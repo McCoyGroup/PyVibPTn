@@ -1,0 +1,1 @@
+"""Makes TheRealMcCoy a package so we can do stuff like import TheRealMcCoy.AtomData and not collide with an extant AtomData"""
