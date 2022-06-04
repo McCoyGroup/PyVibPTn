@@ -133,7 +133,13 @@ class GaussianLogReader(FileStreamReader):
 
         return ("Header", ) + tuple(defs) + ("Footer",)
 
-
+    @classmethod
+    def read_props(cls, file, keys):
+        with cls(file) as reader:
+            parse = reader.parse(keys)
+        if isinstance(keys, str):
+            parse = parse[keys]
+        return parse
 
 ########################################################################################################################
 #
@@ -331,4 +337,11 @@ class GaussianFChkReader(FileStreamReader):
 
         return parse_results
 
+    @classmethod
+    def read_props(cls, file, keys):
+        with cls(file) as reader:
+            parse = reader.parse(keys)
+        if isinstance(keys, str):
+            parse = parse[keys]
+        return parse
 

@@ -6,7 +6,7 @@ import numpy as np, itertools as ip, time, enum
 
 from McUtils.Numputils import SparseArray
 import McUtils.Numputils as nput
-from McUtils.Scaffolding import ParameterManager
+from McUtils.Scaffolding import ParameterManager, Checkpointer, NullCheckpointer
 from McUtils.Data import UnitsData
 
 from ..BasisReps import BasisStateSpace, SelectionRuleStateSpace, BasisMultiStateSpace, SimpleProductBasis, ExpansionWavefunctions, ExpansionWavefunction, BraKetSpace
@@ -15,41 +15,42 @@ from .Terms import DipoleTerms
 from .Solver import PerturbationTheoryCorrections
 
 __all__ = [
-    'PerturbationTheoryWavefunction',
+    # 'PerturbationTheoryWavefunction',
     'PerturbationTheoryWavefunctions'
 ]
 
+__reload_hook__ = ["..Wavefun"]
 
-class PerturbationTheoryWavefunction(ExpansionWavefunction):
-    """
-    These things are fed the first and second order corrections
-    """
 
-    def __init__(self, mol, basis, corrections):
-        """
-        :param mol: the molecule the wavefunction is for
-        :type mol: Molecule
-        :param basis: the basis the expansion is being done in
-        :type basis: RepresentationBasis
-        :param corrections: the corrections to the terms
-        :type corrections: PerturbationTheoryCorrections
-        """
-        self.mol = mol
-        self.corrs = corrections
-        self.rep_basis = basis
-        super().__init__(self.corrs.energies, self.corrs.wavefunctions, None)
-
-    @property
-    def order(self):
-        return self.corrs.order
-
-    def expectation(self, operator, other):
-        return NotImplemented
-
-    @property
-    def zero_order_energy(self):
-        return self.corrs.energies[0]
-
+# class PerturbationTheoryWavefunction(ExpansionWavefunction):
+#     """
+#     These things are fed the first and second order corrections
+#     """
+#
+#     def __init__(self, mol, basis, corrections):
+#         """
+#         :param mol: the molecule the wavefunction is for
+#         :type mol: Molecule
+#         :param basis: the basis the expansion is being done in
+#         :type basis: RepresentationBasis
+#         :param corrections: the corrections to the terms
+#         :type corrections: PerturbationTheoryCorrections
+#         """
+#         self.mol = mol
+#         self.corrs = corrections
+#         self.rep_basis = basis
+#         super().__init__(self.corrs.energies, self.corrs.wavefunctions, None)
+#
+#     @property
+#     def order(self):
+#         return self.corrs.order
+#
+#     def expectation(self, operator, other):
+#         return NotImplemented
+#
+#     @property
+#     def zero_order_energy(self):
+#         return self.corrs.energies[0]
 
 class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
     """
@@ -60,8 +61,11 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                  modes=None,
                  mode_selection=None,
                  logger=None,
+                 checkpoint=None,
+                 results=None,
                  operator_settings=None,
-                 expansion_options=None
+                 expansion_options=None,
+                 degenerate_transformation_layout=None # need to see if this is really necessary...
                  ):
         """
         :param mol: the molecule the wavefunction is for
@@ -81,27 +85,68 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         self._dipole_terms = None
         self._dipole_partitioning = self.DipolePartitioningMethod.Standard
         self.logger = logger
+
+        self.checkpointer = Checkpointer.build_canonical(checkpoint)
+        if results is None:
+            self.results = self.checkpointer
+        else:
+            self.results = Checkpointer.build_canonical(results)
+            
         if expansion_options is None:
             expansion_options = {}
         self.expansion_options = expansion_options
         self.operator_settings = operator_settings if operator_settings is not None else {}
         self._order = None
-        super().__init__(
-            self.corrs.energies,
-            self.corrs.wfn_corrections,
-            None
+        self.degenerate_transformation_layout="column" if degenerate_transformation_layout is None else degenerate_transformation_layout
+        # super().__init__(
+        #     self.corrs.energies,
+        #     self.corrs.wfn_corrections,
+        #     None
+        # )
+    @property
+    def energies(self):
+        return self.corrs.energies
+
+    def to_state(self, serializer=None):
+        keys = dict(
+            corrections=self.corrs,
+            molecule=self.mol,
+            modes=self.modes,
+            mode_selection=self.mode_selection,
+            basis=self.rep_basis,
+            expansion_options=self.expansion_options,
+            operator_settings=self.operator_settings,
+            logger=self.logger
+        )
+        return keys
+
+    @classmethod
+    def from_state(cls, data, serializer=None):
+        return cls(
+            serializer.deserialize(data['molecule']),
+            serializer.deserialize(data['basis']), serializer.deserialize(data['corrections']),
+            modes=serializer.deserialize(data['modes']),
+            mode_selection=serializer.deserialize(data['mode_selection']),
+            logger=serializer.deserialize(data['logger']),
+            operator_settings=serializer.deserialize(data['operator_settings']),
+            expansion_options=serializer.deserialize(data['expansion_options'])
         )
 
     @property
     def degenerate_transformation(self):
         return self.corrs.degenerate_transf
 
+
+    def energies_to_order(self, order=None):
+        if order is None:
+            order = self.corrs.order
+        return np.sum(self.corrs.energy_corrs[:, :order+1], axis=1)
     @property
     def deperturbed_energies(self):
-        return np.sum(self.corrs.energy_corrs[:, :self.corrs.order+1], axis=1)
-
-    def energies_to_order(self, order):
-        return np.sum(self.corrs.energy_corrs[:, :order+1], axis=1)
+        return self.energies_to_order()
+    def deperturbed_frequencies(self, order=None):
+        eng = self.energies_to_order(order=order)
+        return eng[1:] - eng[0]
 
     @property
     def order(self):
@@ -145,26 +190,8 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                                                      **self.operator_settings
                                                      )
 
-    def _mu_representations(self,
-                            mu,
-                            M,
-                            space,
-                            bra_spaces,
-                            ket_spaces,
-                            order,
-                            partitioning,
-                            rep_inds,
-                            allow_higher_dipole_terms=False
-                            ):
-
-        # define out reps based on partitioning style
-        if partitioning is None:
-            partitioning = self.dipole_partitioning
-        elif not isinstance(partitioning, self.DipolePartitioningMethod):
-            partitioning = self.DipolePartitioningMethod(partitioning)
-
-        # filters = [[None] * (order+1) for _ in range(ket_spaces.nstates)]
-        def get_states(m, k, order=order):
+    # @profile
+    def _get_rep_states(self, m, k, order, ket_spaces, bra_spaces):
             with self.logger.block(tag="getting coupled states for {}".format(m)):
                 start = time.time()
                 inds = None
@@ -227,6 +254,30 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
             inds = inds.remove_duplicates(assume_symmetric=True)
 
             return inds
+
+    # from memory_profiler import profile
+    # @profile
+    def _mu_representations(self,
+                            mu,
+                            M,
+                            space,
+                            bra_spaces,
+                            ket_spaces,
+                            order,
+                            partitioning,
+                            rep_inds,
+                            allow_higher_dipole_terms=False
+                            ):
+
+        # define out reps based on partitioning style
+        if partitioning is None:
+            partitioning = self.dipole_partitioning
+        elif not isinstance(partitioning, self.DipolePartitioningMethod):
+            partitioning = self.DipolePartitioningMethod(partitioning)
+
+        # filters = [[None] * (order+1) for _ in range(ket_spaces.nstates)]
+        def get_states(m, k):
+            return self._get_rep_states(m, k, order, ket_spaces, bra_spaces)
 
         if all(
                     isinstance(m, (np.ndarray, SparseArray)) and m.shape == (M, M)
@@ -315,6 +366,9 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
 
             # reps = [m1, m2, m3]
             mu_terms = [None] * len(reps)
+            tb = self.corrs.total_basis
+            # with self.corrs.disk_backed():
+
             for i, h in enumerate(reps):
                 m_pairs = rep_inds[i]
                 if m_pairs is None:
@@ -322,9 +376,9 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
 
                 with self.logger.block(tag="building {}".format(h)):
                     start = time.time()
-                    sub = h.get_representation_matrix(m_pairs, self.corrs.total_basis
+                    sub = h.get_representation_matrix(m_pairs, tb
                                                       , zero_element_warning=False # expect zeros in M(3)?
-                                                      , remove_duplicates=False
+                                                      # , remove_duplicates=False
                                                       )
                     end = time.time()
                     self.logger.log_print('took {t:.3f}s...', t=end - start)
@@ -333,6 +387,7 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
 
         return mu_terms
 
+    # @profile
     def _transition_moments(self,
                             mu_x, mu_y, mu_z,
                             correction_terms=None,
@@ -360,11 +415,19 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         """
 
         if order is None:
-            order = (
-                self.order
-                if 'expansion_order' not in self.expansion_options or self.expansion_options['expansion_order'] is None else
-                self.expansion_options['expansion_order'] + 1
-            )
+            exp_order = None if 'expansion_order' not in self.expansion_options else self.expansion_options['expansion_order']
+            if exp_order is None:
+                exp_order = self.order
+            elif isinstance(exp_order, int):
+                exp_order = exp_order + 1
+            else:
+                if 'dipole' in exp_order:
+                    exp_order = exp_order['dipole'] + 1
+                elif 'default' in exp_order:
+                    exp_order = exp_order['default'] + 1
+                else:
+                    exp_order = self.order
+            order = exp_order
 
         logger = self.logger
         with logger.block(tag="Calculating intensities:", printoptions={'linewidth':int(1e8)}):
@@ -374,7 +437,6 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
             lower_states_input = (0,) if lower_states is None else lower_states
             upper_states_input = tuple(range(space.nstates)) if excited_states is None else excited_states
 
-            corr_terms = self.corrs.wfn_corrections
             if correction_terms is None:
                 if lower_states is None:
                     low_spec = (0,)
@@ -393,8 +455,8 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                     up_spec = excited_states
                     excited_states = space[(up_spec,)]
 
-                bra_spaces = lower_states #if isinstance(lower_states, BasisStateSpace) else lower_states.to_single().take_unique()
-                ket_spaces = excited_states # if isinstance(excited_states, BasisStateSpace) else excited_states.to_single().take_unique()
+                bra_spaces = lower_states  # if isinstance(lower_states, BasisStateSpace) else lower_states.to_single().take_unique()
+                ket_spaces = excited_states  # if isinstance(excited_states, BasisStateSpace) else excited_states.to_single().take_unique()
 
                 # M = len(space.indices)
                 logger.log_print(
@@ -408,7 +470,7 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                 with logger.block(tag='taking correction subspaces:'):
                     start = time.time()
                     logger.log_print('getting ground space...')
-                    corr_terms_lower = [corr_terms[i][low_spec, :] for i in range(order)]
+                    corr_terms_lower = [self.corrs.wfn_corrections[i][low_spec, :] for i in range(order)]
                     logger.log_print(
                         [
                             "highest-order space: {s}",
@@ -417,7 +479,7 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                     )
 
                     logger.log_print('getting excited space...')
-                    corr_terms_upper = [corr_terms[i][up_spec, :].T for i in range(order)]
+                    corr_terms_upper = [self.corrs.wfn_corrections[i][up_spec, :].T for i in range(order)]
                     logger.log_print(
                         [
                             "highest-order space: {s}",
@@ -437,9 +499,8 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                 corr_terms_lower, corr_terms_upper = correction_terms
 
             rep_inds = [None] * 4
-            M = corr_terms[0].shape[1]
+            M = self.corrs.wfn_corrections[0].shape[1]
             total_space = self.corrs.total_basis
-            # corr_vecs = self.corrs.wfn_corrections#[..., M]
             transition_moment_components = np.zeros((order, 3)).tolist()  # x, y, and z components of the 0th, 1st, and 2nd order stuff
 
             mu = [mu_x, mu_y, mu_z]
@@ -470,6 +531,8 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                 rep_inds,
                 allow_higher_dipole_terms=False if 'allow_higher_dipole_terms' not in self.expansion_options else self.expansion_options['allow_higher_dipole_terms']
             )
+
+            # raise Exception("...")
                 # logger.log_print(
                 #     [
                 #         "took {t:.3f}s..."
@@ -478,16 +541,23 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                 # )
 
             # raise Exception(mu_terms)
-
             if degenerate_transformation is None:
                 degenerate_transformation = self.corrs.degenerate_transf
             if degenerate_transformation is not None:
+                    # raise  Exception("ugh")
+                    # degenerate_transformation = degenerate_transformation.T
+
                 if len(lower_states_input) > 1:
                     deg_transf_lower = degenerate_transformation[np.ix_(lower_states_input, lower_states_input)]
+                    if self.degenerate_transformation_layout == "column":
+                        deg_transf_lower = deg_transf_lower.T
                 else:
                     deg_transf_lower = None
                 if len(upper_states_input) > 1:
-                    deg_transf_upper = degenerate_transformation[upper_states_input, :].T
+                    if self.degenerate_transformation_layout == "column":
+                        deg_transf_upper = degenerate_transformation[:, upper_states_input]
+                    else:
+                        deg_transf_upper = degenerate_transformation[upper_states_input, :].T
                 else:
                     deg_transf_upper = None
             else:
@@ -498,10 +568,9 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
             else:
                 transition_moment_components_deg = None
 
+            corr_terms = self.corrs.wfn_corrections
             for a in range(3):
-
                 mu_basic_terms = [r[:, :, a] for r in mu_reps]
-
                 if partitioning == self.DipolePartitioningMethod.Intuitive:
                     mu_terms = [mu_basic_terms[0]]
                     if order > 1:
@@ -580,24 +649,10 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
 
             # we calculate it explicitly like this up front in case we want to use it later since the shape
             # can be a bit confusing ([0-order, 1-ord, 2-ord], [x, y, z])
-            tmom = [
-                sum(
-                    sum(ip.chain(transition_moment_components[i][j]))
-                    if not isinstance(transition_moment_components[i][j], (float, int, np.floating, np.integer))
-                    else transition_moment_components[i][j]
-                    for i in range(order)  # correction order
-                ) for j in range(3)  # xyz
-            ]
+            tmom = self._compute_tmom_to_order(transition_moment_components, order-1)
 
             if degenerate_transformation is not None:
-                tmom_deg = [
-                    sum(
-                        sum(ip.chain(transition_moment_components_deg[i][j]))
-                        if not isinstance(transition_moment_components_deg[i][j], (float, int, np.floating, np.integer))
-                        else transition_moment_components_deg[i][j]
-                        for i in range(order)  # correction order
-                    ) for j in range(3)  # xyz
-                ]
+                tmom_deg = self._compute_tmom_to_order(transition_moment_components_deg, order-1)
             else:
                 tmom_deg = None
 
@@ -612,23 +667,49 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         #     (tmom_deg, transition_moment_components_deg)
         #
         # )
+        with self.checkpointer:
+            if degenerate_transformation is not None:
+                self.checkpointer["transition_moments"] = transition_moment_components_deg
+                self.checkpointer["nondegenerate_transition_moments"] = transition_moment_components
+            else:
+                self.checkpointer["transition_moments"] = transition_moment_components
+
         return [(tmom, transition_moment_components), (tmom_deg, transition_moment_components_deg), mu_reps, (corr_terms_lower, corr_terms_upper)]
+
+    @classmethod
+    def _compute_tmom_to_order(cls, transition_moment_components, order):
+        # we calculate it explicitly like this up front in case we want to use it later since the shape
+        # can be a bit confusing ([0-order, 1-ord, 2-ord], [x, y, z])
+        return [
+            sum(
+                sum(ip.chain(transition_moment_components[i][j]))
+                if not isinstance(transition_moment_components[i][j], (float, int, np.floating, np.integer))
+                else transition_moment_components[i][j]
+                for i in range(order+1)  # correction order
+            ) for j in range(3)  # xyz
+        ]
 
     class TermHolder(tuple):
         """symbolic wrapper on Tuple so we can know that we've canonicalized some term"""
     @property
     def dipole_terms(self):
         if self._dipole_terms is None:
+            if 'dipole_terms' in self.expansion_options:
+                self._dipole_terms = self.TermHolder(self.expansion_options['dipole_terms'])
+            else:
+                self._dipole_terms = self.TermHolder(
+                    DipoleTerms(self.mol, modes=self.modes, mode_selection=self.mode_selection,
+                                **ParameterManager(self.expansion_options).filter(DipoleTerms)
+                                ).get_terms()
+                )
+        elif not isinstance(self._dipole_terms, self.TermHolder):
             self._dipole_terms = self.TermHolder(
                 DipoleTerms(self.mol, modes=self.modes, mode_selection=self.mode_selection,
+                            dipole_derivatives=self._dipole_terms,
                             **ParameterManager(self.expansion_options).filter(DipoleTerms)
                             ).get_terms()
             )
-        elif not isinstance(self._dipole_terms, self.TermHolder):
-            self._dipole_terms = self.TermHolder(DipoleTerms(self.mol, modes=self.modes, mode_selection=self.mode_selection, derivatives=self._dipole_terms,
-                                                             **ParameterManager(self.expansion_options).filter(DipoleTerms)
-                                                             ).get_terms()
-                                                 )
+        # print([x for x in self._dipole_terms])
         return self._dipole_terms
 
     @dipole_terms.setter
@@ -722,8 +803,6 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         """
 
         tms = self.transition_moments
-
-
         return self._oscillator_strengths(tms)
 
     @property
@@ -747,7 +826,24 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         :rtype:
         """
 
-        return self._oscillator_strengths(self.transition_moments_to_order(order))
+        return self._oscillator_strengths(self._compute_tmom_to_order(
+            self.transition_moment_corrections,
+            order
+        ))
+
+    def deperturbed_oscillator_strengths_to_order(self, order):
+        """
+
+        :param tms:
+        :type tms:
+        :return:
+        :rtype:
+        """
+
+        return self._oscillator_strengths(self._compute_tmom_to_order(
+            self.deperturbed_transition_moment_corrections,
+            order
+        ))
 
     def _oscillator_strengths(self, tms):
 
@@ -763,7 +859,15 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         :return:
         :rtype:
         """
-        return self._intensities(self.oscillator_strengths)
+
+        freqs, ints = self._intensities(self.oscillator_strengths)
+        with self.results: # TODO: this really isn't the right place for this...
+            self.results['spectrum'] = (
+                freqs,
+                ints
+            )
+
+        return ints
 
     @property
     def deperturbed_intensities(self):
@@ -773,7 +877,7 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         :return:
         :rtype:
         """
-        return self._intensities(self.deperturbed_oscillator_strengths)
+        return self._dep_intensities(self.deperturbed_oscillator_strengths)[1]
 
     def intensities_to_order(self, order):
         """
@@ -782,15 +886,36 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         :return:
         :rtype:
         """
-        return self._intensities(self.oscillator_strengths_to_order(order), energy_order=order)
+        return self._intensities(self.oscillator_strengths_to_order(order), energy_order=order)[1]
+
+    def deperturbed_intensities_to_order(self, order):
+        """
+        Computes the intensities for transitions from the ground state to the other states
+
+        :return:
+        :rtype:
+        """
+        return self._dep_intensities(self.deperturbed_oscillator_strengths_to_order(order), energy_order=order)[1]
+
+    def _dep_intensities(self, oscs, energy_order=None):
+        if energy_order is None:
+            eng = self.deperturbed_energies
+        else:
+            eng = self.energies_to_order(energy_order)
+        freqs = eng - eng[0]
+        units = UnitsData.convert("OscillatorStrength", "KilometersPerMole")
+        return freqs, units * freqs * oscs
 
     def _intensities(self, oscs, energy_order=None):
         if energy_order is None:
             eng = self.energies
+        elif self.degenerate_transformation is not None:
+            raise NotImplementedError("ugh")
         else:
             eng = self.energies_to_order(energy_order)
+        freqs = eng - eng[0]
         units = UnitsData.convert("OscillatorStrength", "KilometersPerMole")
-        return units * (eng - eng[0]) * oscs
+        return freqs, units * freqs * oscs
 
     @property
     def zero_order_intensities(self):
@@ -801,12 +926,15 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
         :rtype:
         """
         eng = self.zero_order_energies
-        tm = np.array([
-            self.deperturbed_transition_moment_corrections[0][x][0][0] for x in range(3)
-        ]).T
-        osc = np.linalg.norm(tm, axis=1) ** 2
-        units = UnitsData.convert("OscillatorStrength", "KilometersPerMole")
-        return units * (eng - eng[0]) * osc
+        ints = self.deperturbed_intensities_to_order(0)
+
+        with self.results: #TODO: this is the wrong place for this
+            self.results['zero_order_spectrum'] = (
+                eng - eng[0],
+                ints
+            )
+
+        return ints
 
     def generate_intensity_breakdown(self, include_wavefunctions=True):
         """
@@ -870,7 +998,7 @@ class PerturbationTheoryWavefunctions(ExpansionWavefunctions):
                 ]
                 tms = self._transition_moments(*new_mu)
                 oscs = self._oscillator_strengths(tms[0])
-                ints = self._intensities(oscs)
+                freqs, ints = self._intensities(oscs)
 
             full_corrs = self.transition_moment_corrections
             # raise Exception([np.array(x).shape for x in full_corrs])

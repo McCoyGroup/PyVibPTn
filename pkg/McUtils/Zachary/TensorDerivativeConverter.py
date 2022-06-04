@@ -732,7 +732,7 @@ class TensorDerivativeConverter:
 
         self.terms = TensorExpansionTerms(jacobians, derivatives, qxv_terms=mixed_terms, q_name=jacobians_name, v_name=values_name)
 
-    def convert(self, order=None, check_arrays=False):
+    def convert(self, order=None, print_transformations=False, check_arrays=False):
 
         if order is None:
             order = len(self.terms.qx_terms)
@@ -747,7 +747,8 @@ class TensorDerivativeConverter:
         for i in range(2, order+1):
             # print(">>>>>", deriv)
             deriv = deriv.dQ().simplify(check_arrays=check_arrays) # there's an occasional issue with shift simplifications I think...
-            # print("<< ", deriv)
+            if print_transformations:
+                print(">> order: ", i, deriv)
             arrays.append(deriv.array)
 
         return arrays

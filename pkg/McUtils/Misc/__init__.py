@@ -7,8 +7,6 @@ from .TemplateWriter import *; from .TemplateWriter import __all__ as exposed
 __all__ += exposed
 from .FileMatcher import *; from .FileMatcher import __all__ as exposed
 __all__ += exposed
-from .InteractiveTools import *; from .InteractiveTools import __all__ as exposed
-__all__ += exposed
 from .SBatchHelper import *; from .SBatchHelper import __all__ as exposed
 __all__ += exposed
 from .NumbaTools import *; from .NumbaTools import __all__ as exposed

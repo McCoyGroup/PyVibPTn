@@ -7,7 +7,9 @@ __all__ = [
     "ExpansionRepresentation"
 ]
 
-import numpy as np, itertools as ip, scipy.sparse as sp, time, gc
+import tracemalloc
+
+import numpy as np, itertools as ip, scipy.sparse as sp, time, gc, tempfile as tf
 
 from McUtils.Numputils import SparseArray
 import McUtils.Numputils as nput
@@ -28,7 +30,8 @@ class Representation:
 
     def __init__(self, compute, basis, name=None, logger=None,
                  selection_rules=None,
-                 selection_rule_steps=None
+                 selection_rule_steps=None,
+                 memory_constrained=False
                  ):
         """
         :param compute: the function that turns indices into values
@@ -55,6 +58,7 @@ class Representation:
         self._selection_rules = selection_rules
         self._selection_rule_steps = selection_rule_steps
         self.name=name
+        self.memory_constrained = memory_constrained
 
     @property
     def parallelizer(self):
@@ -75,6 +79,12 @@ class Representation:
             self.array._compute_uncached_values(self._compute, inds)
         else:
             raise ValueError("Can only compute cached values when given explicit BraKets")
+    @property
+    def chunk_size(self):
+        if self.operator is None:
+            return None
+        else:
+            return self.operator.chunk_size
 
     def clear_cache(self):
         # print(">>>>>>>>>>>>> wat", self.compute, self.operator)
@@ -84,8 +94,12 @@ class Representation:
         elif hasattr(self.compute, 'clear_cache'):
             self.compute.clear_cache()
         gc.collect()
-    def _compute_op_els(self, inds, check_orthogonality=True):
-        return self.operator.get_elements(inds, check_orthogonality=check_orthogonality)
+    def _compute_op_els(self, inds, check_orthogonality=True, memory_constrained=None):
+        res = self.operator.get_elements(inds,
+                                          check_orthogonality=check_orthogonality,
+                                          memory_constrained=self.memory_constrained if memory_constrained is None else memory_constrained
+                                          )
+        return res
 
     @property
     def diag(self):
@@ -120,8 +134,8 @@ class Representation:
             if len(negs[0]) > 0:
                 n[negs] += self.ndims
             return n
-
-    def get_brakets(self, states, check_orthogonality=True):
+    # @profile
+    def get_brakets(self, states, check_orthogonality=True, memory_constrained=False):
         """
         Computes term elements based on getting a BraKetSpace.
         Can directly pass element specs through, since the shape management shit
@@ -140,7 +154,7 @@ class Representation:
             states=states
         )
 
-        return self.compute(states, check_orthogonality=check_orthogonality)
+        return self.compute(states, check_orthogonality=check_orthogonality, memory_constrained=memory_constrained)
 
     def get_element(self, n, m):
         """
@@ -253,7 +267,9 @@ class Representation:
         if isinstance(other, (int, float, np.integer, np.floating)):
             return ExpansionRepresentation([other], [self], self.basis,
                                            name=self.name,
-                                           logger=self.logger)
+                                           logger=self.logger,
+                                           memory_constrained=self.memory_constrained
+            )
         else:
             raise TypeError("operator * not defined for objects of type {0} and {1} (only numbers are supported with {0})".format(
                 type(self).__name__,
@@ -264,7 +280,9 @@ class Representation:
             return ExpansionRepresentation([other], [self],
                                            self.basis,
                                            name=self.name,
-                                           logger=self.logger)
+                                           logger=self.logger,
+                                           memory_constrained=self.memory_constrained
+                                           )
         else:
             raise TypeError("operator * not defined for objects of type {0} and {1} (only numbers are supported with {0})".format(
                 type(self).__name__,
@@ -283,7 +301,8 @@ class Representation:
                                            [self, other],
                                            self.basis,
                                            name=self.name + other.name if self.name is not None and other.name is not None else None,
-                                           logger=self.logger
+                                           logger=self.logger,
+                                           memory_constrained=self.memory_constrained
             )
         else:
             raise TypeError("operator + not defined for objects of type {0} and {1} (only subclasses of TermComputer are supported with {0})".format(
@@ -403,7 +422,6 @@ class Representation:
         return self.array.dot(other)
 
     # from memory_profiler import profile
-    # @profile
     def _build_rep_matrix(self, row_inds, col_inds, N, sub, method='unique'):
 
         if method == 'low_mem':
@@ -491,7 +509,7 @@ class Representation:
             # lower triangle is made by transposition
             low_tri = np.array([col_inds, row_inds]).T
             # but now we need to remove the duplicates, because many sparse matrix implementations
-            # will sum up any repeated elements
+            # will sum up any repeated elements...
             full_inds = np.concatenate([up_tri, low_tri])
             full_dat = np.concatenate([sub, sub], axis=0)
 
@@ -548,7 +566,8 @@ class Representation:
                                   clear_sparse_caches=True,
                                   clear_operator_caches=True,
                                   assume_symmetric=True,
-                                  remove_duplicates=True
+                                  remove_duplicates=True,
+                                  memory_constrained=None
                                   ):
         """
         Actively constructs a perturbation theory Hamiltonian representation
@@ -563,6 +582,9 @@ class Representation:
 
         if not assume_symmetric:
             raise NotImplementedError("don't have non-symmetric representations implemented")
+
+        if memory_constrained is None:
+            memory_constrained = self.memory_constrained
 
         if logger is None:
             logger = self.logger
@@ -580,7 +602,7 @@ class Representation:
 
         if len(m_pairs) > 0:
             # logger.log_print(["coupled space dimension {d}"], d=len(m_pairs))
-            sub = self.get_brakets(m_pairs, check_orthogonality=not diagonal)
+            sub = self.get_brakets(m_pairs, check_orthogonality=not diagonal, memory_constrained=memory_constrained)
             if isinstance(sub, SparseArray):
                 sub = sub.asarray()
             if clear_sparse_caches:
@@ -618,91 +640,158 @@ class Representation:
             else:
                 # we assume duplicates were removed earlier
 
-                logger.log_print("finding row/column indices...", log_level=logger.LogLevel.Debug)
-                # figure out the appropriate inds for this data in the sparse representation
-                row_inds = total_space.find(m_pairs.bras)
-                col_inds = total_space.find(m_pairs.kets)
-                N = len(total_space)
-                del m_pairs # free up memory _before_ building the matrix
-
-                # del full_inds_filter
-
-                logger.log_print("constructing full row/col index array...", log_level=logger.LogLevel.Debug)
-                # ninds = len(row_inds)
-                # first_bits = sidx[sidx < ninds]
-                # last_bits = sidx[sidx >= ninds] - ninds
-
-                utri = row_inds != col_inds
-                full_inds = np.array([
-                    np.concatenate([row_inds, col_inds[utri]]),
-                    np.concatenate([col_inds, row_inds[utri]])
-                ]).T
-                # _, idx = np.unique(full_inds, axis=0, return_index=True)
-                # sidx = np.sort(idx)
-
-                # nddup = len(np.unique(diag_inds))
-                # logger.log_print("pre/pos: {nfull}/{nun} diags/undiags:{ndig}/{nddup} ??? {ndiff}",
-                #                  nfull=len(full_inds), nun=len(sidx),
-                #                  ndig=len(diag_inds), nddup=nddup,
-                #                  ndiff = len(full_inds) - nddup
-                #                  )
-                # full_inds = full_inds[sidx]
-
-                del row_inds
-                del col_inds
-
-                # logger.log_print("subsampling indices...")
-                # full_inds = full_inds[sidx]
+                utri, full_inds = self._pull_rep_mat_inds(logger, total_space, m_pairs)
 
                 logger.log_print("getting vals array...", log_level=logger.LogLevel.Debug)
-
                 full_dat = np.concatenate([sub, sub[utri]], axis=0)
-                del sub
-                # full_dat = full_dat[sidx]
+                del sub, utri
 
-                # N = len(total_space)
-                if full_dat.ndim > 1:
-                    # need to tile the inds enough times to cover the shape of full_dat
-                    # _, inds = np.unique(full_inds, axis=0, return_index=True)
-                    # sidx = np.sort(inds)
-                    # full_inds = full_inds[sidx]
-                    # full_dat = full_dat[sidx]
+                sorting = np.argsort(full_inds[:, 0])
+                np.take(full_dat, sorting, out=full_dat, axis=0, mode='clip')
+                np.take(full_inds, sorting, out=full_inds, axis=0, mode='clip')
+                del sorting
 
-                    logger.log_print("making data multi-dim...", log_level=logger.LogLevel.Debug)
-                    ext_shape = full_dat.shape[1:]
-                    shape = (N, N) + ext_shape
-                    full_dat = np.moveaxis(full_dat, 0, -1).flatten()
-
-
-                    logger.log_print("populating index array...", log_level=logger.LogLevel.Debug)
-                    rows, cols = full_inds.T
-                    full_inds = np.empty(
-                        (2 + len(ext_shape), len(full_dat)),
-                        dtype=int
-                    )
-                    block_size = len(rows)
-                    # create a tensor of indices that will be used to appropriately tile
-                    # the system
-                    ind_tensor = np.moveaxis(np.indices(ext_shape), 0, -1).reshape(-1, len(ext_shape))
-                    for n, idx in enumerate(ind_tensor):
-                        s, e = n * block_size, (n + 1) * block_size
-                        full_inds[0, s:e] = rows
-                        full_inds[1, s:e] = cols
-                        for j, x in enumerate(idx):
-                            full_inds[2 + j, s:e] = x
-                    del rows
-                    del cols
-
-                else:
-                    full_inds = full_inds.T
-                    shape = (N, N)
+                full_dat, full_inds, shape = self._handle_multidim_rep_mat(logger, full_dat, full_inds, N)
 
                 logger.log_print("building sparse tensor...", log_level=logger.LogLevel.Debug)
-                gc.collect() # might help just enough to fix things...?
                 # another attempt
-                sub = SparseArray.from_data((full_dat, full_inds), shape=shape, cache_block_data=False, logger=logger)
+                # if False and memory_constrained:
+                #     with tf.NamedTemporaryFile() as full_dat_dump:
+                #         with tf.NamedTemporaryFile() as full_inds_dump:
+                #             full_dat_map = np.memmap(full_dat_dump.name, dtype=full_dat.dtype, shape=full_dat.shape)
+                #             full_dat_map[:] = full_dat[:]
+                #             del full_dat
+                #
+                #             full_inds_map = np.memmap(full_inds_dump.name, dtype=full_inds.dtype, shape=full_inds.shape)
+                #             full_inds_map[:] = full_inds[:]
+                #             del full_inds
+                #
+                #             sub = SparseArray.from_data((full_dat_map, full_inds_map),
+                #                                         shape=shape,
+                #                                         cache_block_data=False,
+                #                                         logger=logger
+                #                                         # layout='coo'
+                #                                         )
+                #             # sub2 = SparseArray.from_data((full_dat, full_inds), shape=shape, cache_block_data=False, logger=logger)
+                #             #
+                #             # raise Exception(np.sum(sub.asarray() - sub2.asarray()))
+                #
+                # else:
+                cs = self.chunk_size
+                if cs is not None:
+                    blocks = int(np.ceil(len(full_dat) / cs))
+                    sub = None
+                    for i in range(blocks):
+                        s = i*cs; e = min((i+1)*cs, len(full_dat))
+                        init = SparseArray.initializer_list(full_dat[s:e], full_inds[:, s:e])
+                        subub = SparseArray.from_data(init,
+                                                shape=shape,
+                                                cache_block_data=False,
+                                                logger=logger
+                                                , init_kwargs=dict(assume_sorted=True)
+                                                )
+                        if sub is None:
+                            sub = subub
+                        else:
+                            sub += subub
+
+                    del full_dat
+                    del full_inds
+
+                else:
+                    init = SparseArray.initializer_list(full_dat, full_inds)
+                    del full_dat
+                    del full_inds
+                    sub = SparseArray.from_data(init,
+                                                shape=shape,
+                                                cache_block_data=False,
+                                                logger=logger
+                                                , init_kwargs=dict(assume_sorted=True)
+                                                )
+                    del init
+
 
         return sub
+
+    # @profile
+    def _pull_rep_mat_inds(self, logger, total_space, m_pairs):
+        logger.log_print("finding row/column indices...", log_level=logger.LogLevel.Debug)
+        # figure out the appropriate inds for this data in the sparse representation
+
+        # I should probably add some level of chunking on this?
+        # or force `bras` to keep its data on disk?
+        row_inds = total_space.find(m_pairs.bras, minimal_dtype=True)
+        col_inds = total_space.find(m_pairs.kets, minimal_dtype=True)
+
+        logger.log_print("constructing full row/col index array...", log_level=logger.LogLevel.Debug)
+        # ninds = len(row_inds)
+        # first_bits = sidx[sidx < ninds]
+        # last_bits = sidx[sidx >= ninds] - ninds
+
+        utri = row_inds != col_inds
+        full_inds = np.array([
+            np.concatenate([row_inds, col_inds[utri]]),
+            np.concatenate([col_inds, row_inds[utri]])
+        ]).T
+        # _, idx = np.unique(full_inds, axis=0, return_index=True)
+        # sidx = np.sort(idx)
+
+        # nddup = len(np.unique(diag_inds))
+        # logger.log_print("pre/pos: {nfull}/{nun} diags/undiags:{ndig}/{nddup} ??? {ndiff}",
+        #                  nfull=len(full_inds), nun=len(sidx),
+        #                  ndig=len(diag_inds), nddup=nddup,
+        #                  ndiff = len(full_inds) - nddup
+        #                  )
+        # full_inds = full_inds[sidx]
+
+        return utri, full_inds
+
+    # @profile
+    def _handle_multidim_rep_mat(self, logger, full_dat, full_inds, N):
+
+        if full_dat.ndim > 1:
+            # need to tile the inds enough times to cover the shape of full_dat
+
+            logger.log_print("making data multi-dim...", log_level=logger.LogLevel.Debug)
+            ext_shape = full_dat.shape[1:]
+            shape = (N, N) + ext_shape
+            full_dat = full_dat.flatten()
+
+            logger.log_print("populating index array...", log_level=logger.LogLevel.Debug)
+            rows, cols = full_inds.T
+            full_inds = np.empty(
+                (len(shape), len(full_dat)),
+                dtype=nput.infer_inds_dtype(len(full_dat))
+            )
+
+            # create a tensor of indices that will be used to appropriately tile
+            # the system
+            stride = len(shape)
+            # print(len(shape), len(full_dat)/len(rows))
+            # row_repeats = np.broadcast_to(rows[:, np.newaxis], (len(rows), len(ext_shape))).flatten()
+            # del rows
+            # col_repeats = np.broadcast_to(cols[:, np.newaxis], (len(cols), len(ext_shape))).flatten()
+            # del cols
+            ind_tensor = np.moveaxis(np.indices(ext_shape), 0, -1).reshape(-1, len(ext_shape))
+            for n, idx in enumerate(ind_tensor):
+                # we want this to remain sorted, so
+                # we want to tile this in such a way that
+                # all of the things associated with row 0 come first
+                # then with row 1
+                # then row 2, etc
+                # To do so, we fill with an offset of num extra columns
+                full_inds[0, n::stride] = rows
+                full_inds[1, n::stride] = cols
+                for j, x in enumerate(idx):
+                    full_inds[2 + j, n::stride] = x
+            del rows
+            del cols
+
+        else:
+            full_inds = full_inds.T
+            shape = (N, N)
+
+        return full_dat, full_inds, shape
 
     def get_diagonal_representation(self,
                                   coupled_space,
@@ -783,7 +872,7 @@ class ExpansionRepresentation(Representation):
     """
     Provides support for terms that look like `1/2 pGp + 1/2 dV/dQdQ QQ` by computing each term on its own
     """
-    def __init__(self, coeffs, computers, basis, name=None, logger=None):
+    def __init__(self, coeffs, computers, basis, name=None, logger=None, memory_constrained=False):
         """
         :param coeffs: The expansion coefficients
         :type coeffs: Iterable[float]
@@ -794,7 +883,7 @@ class ExpansionRepresentation(Representation):
         """
         self.coeffs = np.array(coeffs)
         self.computers = [Representation(c, basis) if not isinstance(c, Representation) else c for c in computers]
-        super().__init__(None, basis, name=name, logger=logger)
+        super().__init__(None, basis, name=name, logger=logger, memory_constrained=memory_constrained)
 
     def clear_cache(self):
         for c in self.computers:
@@ -901,13 +990,19 @@ class ExpansionRepresentation(Representation):
 
         return els
 
-    def get_brakets(self, states, check_orthogonality=True):
+    def get_brakets(self, states, check_orthogonality=True, memory_constrained=False):
         if not isinstance(states, BraKetSpace):
             states = BraKetSpace.from_indices(states, basis=self.basis)
-        return self._dispatch_over_expansion('get_brakets', states, check_orthogonality=check_orthogonality)
-
+        return self._dispatch_over_expansion('get_brakets', states, check_orthogonality=check_orthogonality, memory_constrained=memory_constrained)
     def get_element(self, n, m):
         return self._dispatch_over_expansion('get_element', n, m)
+    @property
+    def chunk_size(self):
+        for c in self.computers:
+            if c.chunk_size is not None:
+                return c.chunk_size
+        else:
+            return None
 
     @property
     def selection_rules(self):

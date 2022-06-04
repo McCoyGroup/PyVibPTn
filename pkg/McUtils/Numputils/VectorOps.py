@@ -543,9 +543,9 @@ def pts_dihedrals(pts1, pts2, pts3, pts4):
     # return vec_angles(normals, off_plane_vecs)[0]
 
     # compute signed angle between the normals to the b1xb2 plane and b2xb3 plane
-    b1 = pts2-pts1
-    b2 = pts3-pts2
-    b3 = pts4-pts3
+    b1 = pts2-pts1 # 4->1
+    b2 = pts3-pts2 # 1->2
+    b3 = pts4-pts3 # 2->3
 
     n1 = vec_crosses(b1, b2, normalize=True)
     n2 = vec_crosses(b2, b3, normalize=True)
@@ -553,7 +553,8 @@ def pts_dihedrals(pts1, pts2, pts3, pts4):
     d1 = vec_dots(n1, n2)
     d2 = vec_dots(m1, n2)
 
-    return np.arctan2(d2, d1)
+    # arctan(d2/d1) + sign stuff from relative signs of d2 and d1
+    return -np.arctan2(d2, d1)
 
 ################################################
 #
@@ -628,7 +629,7 @@ def cartesian_from_rad_transforms(centers, vecs1, vecs2, angles, dihedrals, retu
     crosses = vec_crosses(vecs1, vecs2)
     rot_mats_1 = rotation_matrix(crosses, -angles)
     if dihedrals is not None:
-        rot_mats_2 = rotation_matrix(vecs1, -dihedrals)
+        rot_mats_2 = rotation_matrix(vecs1, dihedrals)
         rot_mat = np.matmul(rot_mats_2, rot_mats_1)
     else:
         rot_mat = rot_mats_1
@@ -645,7 +646,7 @@ def cartesian_from_rad_transforms(centers, vecs1, vecs2, angles, dihedrals, retu
 #
 #       cartesian_from_rad
 #
-def cartesian_from_rad(xa, xb, xc, r, a, d, return_comps=False):
+def cartesian_from_rad(xa, xb, xc, r, a, d, psi=False, return_comps=False):
     """
     Constructs a Cartesian coordinate from a bond length, angle, and dihedral
     and three points defining an embedding
@@ -670,17 +671,32 @@ def cartesian_from_rad(xa, xb, xc, r, a, d, return_comps=False):
     """
 
     v = xb - xa
-    vecs1 = vec_normalize(v)
+    center = xa
     if a is None:
+        vecs1 = vec_normalize(v)
         # no angle so all we have is a bond length to work with
         # means we don't even really want to build an affine transformation
         newstuff = xa + r[..., np.newaxis] * vecs1
-
         comps = (v, None, None, None, None)
     else:
+        # print(">>>", psi)
         u = xc - xb
+        if isinstance(psi, np.ndarray):
+            # a = -a
+            # vecs1 = vec_normalize(v)
+            # v[psi] = -v[psi]
+            # center = center.copy()
+            # center[psi] = xb[psi]
+            d = np.pi - d
+            # d[psi] = np.pi-d
+        # elif psi:
+        #     center = xb
+        #     v = xa - xb
+        #     u = xa - xc
+        vecs1 = vec_normalize(v)
         vecs2 = vec_normalize(u)
-        transfs, comps = cartesian_from_rad_transforms(xa, vecs1, vecs2, a, d, return_comps=return_comps)
+        transfs, comps = cartesian_from_rad_transforms(center, vecs1, vecs2, a, d,
+                                                       return_comps=return_comps)
         newstuff = affine_multiply(transfs, r * vecs1)
         if return_comps:
             comps = (v, u) + comps

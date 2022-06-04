@@ -71,6 +71,9 @@ class ObjectRegistry:
     def temp_default(self, val):
         return RegistryDefaultContext(self, val)
 
+    def __contains__(self, item):
+        return self.cache.__contains__(item)
+
     def lookup(self, key):
         if self.default is ObjectRegistryDefaults.Raise:
             return self.cache[key]
@@ -79,6 +82,17 @@ class ObjectRegistry:
                 return self.cache[key]
             except KeyError:
                 return self.default
+    def __getitem__(self, item):
+        return self.lookup(item)
 
     def register(self, key, val):
         self.cache[key] = val
+    def __setitem__(self, key, value):
+        self.register(key, value)
+
+    def keys(self):
+        return self.cache.keys()
+    def items(self):
+        return self.cache.items()
+    def values(self):
+        return self.cache.values()

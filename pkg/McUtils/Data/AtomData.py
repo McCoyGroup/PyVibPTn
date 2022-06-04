@@ -4,6 +4,7 @@ Provides a class for handling a compiled set of atomic data
 from .CommonData import DataHandler
 
 __all__ = [ "AtomData", "AtomDataHandler" ]
+__reload_hook__ = [".CommonData"]
 
 class AtomDataHandler(DataHandler):
     """

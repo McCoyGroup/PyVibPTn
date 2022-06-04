@@ -18,6 +18,12 @@ class Styled:
     def __init__(self, *str, **opts):
         self.val = str
         self.opts = opts
+    @classmethod
+    def could_be(cls, data):
+        return isinstance(data, tuple) and len(data) == 2 and isinstance(data[1], dict)
+    @classmethod
+    def construct(cls, data):
+        return cls(data[0], **data[1])
 
 class ThemeManager:
     """

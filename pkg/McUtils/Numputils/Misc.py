@@ -5,33 +5,50 @@ __all__ = [
     'infer_inds_dtype',
     'infer_int_dtype',
     'flatten_dtype',
-    'unflatten_dtype'
+    'unflatten_dtype',
+    'recast_permutation',
+    'recast_indices',
+    'downcast_index_array'
 ]
 
+def downcast_index_array(a, max_val):
+    return a.astype(infer_inds_dtype(max_val))
+
+def recast_permutation(permutation_array):
+    a = np.asanyarray(permutation_array)
+    max_val = a.shape[-1]
+    return downcast_index_array(a, max_val)
+
+def recast_indices(indexing_array):
+    a = np.asanyarray(indexing_array)
+    max_val = np.max(a)
+    return downcast_index_array(a, max_val)
+
 def infer_inds_dtype(max_size):
+    return np.min_scalar_type(max_size) # reset
     # needed the memory help back...
-    # return 'int64' # short-circuit for now b.c. this isn't really relevant
-    if max_size < 256:
-        minimal_dtype = 'uint8'
-    elif max_size < 65535:
-        minimal_dtype = 'uint16'
-    elif max_size < 4294967295:
-        minimal_dtype = 'uint32'
-    else:
-        minimal_dtype = 'uint64'
-    return minimal_dtype
+    # if max_size < 256:
+    #     minimal_dtype = 'uint8'
+    # elif max_size < 65535:
+    #     minimal_dtype = 'uint16'
+    # elif max_size < 4294967295:
+    #     minimal_dtype = 'uint32'
+    # else:
+    #     minimal_dtype = 'uint64'
+    # return minimal_dtype
 
 def infer_int_dtype(max_dim):
-    max_dim = abs(max_dim)
-    if max_dim < 128:
-        minimal_dtype = 'int8'
-    elif max_dim < 32768:
-        minimal_dtype = 'int16'
-    elif max_dim < 2147483648:
-        minimal_dtype = 'int32'
-    else:
-        minimal_dtype = 'int64'
-    return minimal_dtype
+    return np.min_scalar_type(-max_dim)
+    # max_dim = abs(max_dim)
+    # if max_dim < 128:
+    #     minimal_dtype = 'int8'
+    # elif max_dim < 32768:
+    #     minimal_dtype = 'int16'
+    # elif max_dim < 2147483648:
+    #     minimal_dtype = 'int32'
+    # else:
+    #     minimal_dtype = 'int64'
+    # return minimal_dtype
 
 def flatten_dtype(ar, dtype=None):
     """

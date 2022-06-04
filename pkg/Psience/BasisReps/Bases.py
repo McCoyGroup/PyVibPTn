@@ -38,10 +38,22 @@ class RepresentationBasis(metaclass=abc.ABCMeta):
 
     @property
     def dimensions(self):
+        """
+        Returns the dimensions of the basis
+
+        :return:
+        :rtype:
+        """
         return (self.quanta,)
 
     @property
     def ndim(self):
+        """
+        Returns the number of dimensions of the basis
+
+        :return:
+        :rtype:
+        """
         return 1
 
     def ravel_state_inds(self, idx):
@@ -137,14 +149,29 @@ class RepresentationBasis(metaclass=abc.ABCMeta):
 
     selection_rules_mapping = {'x': None, 'p': None, 'I': [0]}
     def operator(self, *terms, logger=None, parallelizer=None, chunk_size=None):
+        """
+        Provides an `Operator` to handle the given terms
+
+        :param terms:
+        :type terms:
+        :param logger:
+        :type logger:
+        :param parallelizer:
+        :type parallelizer:
+        :param chunk_size:
+        :type chunk_size:
+        :return:
+        :rtype:
+        """
         from .Operators import Operator
         funcs = [self.operator_mapping[f] if isinstance(f, str) else f for f in terms]
         q = (self.quanta,)
         op = Operator(funcs, q, logger=logger, parallelizer=parallelizer, chunk_size=chunk_size)
         return op
-    def representation(self, *terms, logger=None, name=None, parallelizer=None, chunk_size=None):
+    def representation(self, *terms, logger=None, name=None, parallelizer=None, chunk_size=None, memory_constrained=False):
         """
-        Provides a representation of a product operator specified by 'terms'
+        Provides a representation of a product operator specified by `terms`
+
         :param terms:
         :type terms:
         :return:
@@ -154,7 +181,7 @@ class RepresentationBasis(metaclass=abc.ABCMeta):
         q=self.quanta
         return Representation(self.operator(*terms,
                                             logger=logger, parallelizer=parallelizer, chunk_size=chunk_size),
-                              self, name=name
+                              self, name=name, memory_constrained=memory_constrained
                               )
 
     @classmethod
@@ -328,10 +355,22 @@ class SimpleProductBasis(RepresentationBasis):
 
     @property
     def ndim(self):
+        """
+        Provides the number of dimensions of the basis
+
+        :return:
+        :rtype:
+        """
         return len(self.bases)
 
     @property
     def dimensions(self):
+        """
+        Provides the dimensions of the basis
+
+        :return:
+        :rtype:
+        """
         return self.quanta
 
     def __eq__(self, other):
@@ -345,6 +384,12 @@ class SimpleProductBasis(RepresentationBasis):
 
     @property
     def quanta(self):
+        """
+        Provides the quanta in each dimension of the basis
+
+        :return:
+        :rtype:
+        """
         return tuple(b.quanta for b in self.bases)
     @quanta.setter
     def quanta(self, n):
@@ -428,7 +473,7 @@ class SimpleProductBasis(RepresentationBasis):
                           parallelizer=parallelizer, logger=logger, chunk_size=chunk_size)
         return op
     def representation(self, *terms, coeffs=None, name=None, axes=None,
-                       logger=None, parallelizer=None, chunk_size=None):
+                       logger=None, parallelizer=None, chunk_size=None, memory_constrained=False):
         """
         Provides a representation of a product operator specified by _terms_.
         If `coeffs` or `axes` are supplied, a `ContractedOperator` is built.
@@ -442,7 +487,7 @@ class SimpleProductBasis(RepresentationBasis):
         return Representation(
             self.operator(*terms, coeffs=coeffs, axes=axes,
                           parallelizer=parallelizer, logger=logger, chunk_size=chunk_size),
-            self, logger=logger, name=name
+            self, logger=logger, name=name, memory_constrained=memory_constrained
         )
     def x(self, n):
         """

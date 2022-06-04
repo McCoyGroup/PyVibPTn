@@ -169,11 +169,9 @@ class FchkDipoleDerivatives:
         if self._n is None:
             self._n = int(len(self.derivs)/9) # solving 3*3n == l
         return self._n
-
     @property
     def n(self):
         return self._get_n()
-
     @property
     def shape(self):
         return (3*self.n, 3)
@@ -186,7 +184,6 @@ class FchkDipoleHigherDerivatives:
     def __init__(self, derivs):
         self.derivs = derivs
         self._n = None
-
     def _get_n(self):
         """
         :return:
@@ -198,11 +195,9 @@ class FchkDipoleHigherDerivatives:
             l = len(self.derivs)
             self._n = int(1 + np.sqrt(1 + l/54)) # solving 3n*(3n-6) == l/6
         return self._n
-
     @property
     def n(self):
         return self._get_n()
-
     @property
     def shape(self):
         return (3*self.n - 6, 3*self.n, 3)

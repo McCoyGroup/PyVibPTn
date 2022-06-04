@@ -4,7 +4,7 @@ to minimize things like excess sorts
 """
 
 import numpy as np
-from .Misc import flatten_dtype, unflatten_dtype
+from .Misc import flatten_dtype, unflatten_dtype, recast_permutation, recast_indices, downcast_index_array
 
 __all__ = [
     'unique',
@@ -24,10 +24,10 @@ def argsort(ar):
     ar = np.asanyarray(ar)
     if ar.ndim > 1:
         ar, _, _, _ = coerce_dtype(ar)
-    return np.argsort(ar, kind='mergesort')
+    return recast_permutation(np.argsort(ar, kind='mergesort'))
 
 def unique(ar, return_index=False, return_inverse=False,
-           return_counts=False, axis=0, sorting=None):
+           return_counts=False, axis=0, sorting=None, minimal_dtype=False):
     """
     A variant on np.unique with default support for `axis=0` and sorting
     """
@@ -35,7 +35,7 @@ def unique(ar, return_index=False, return_inverse=False,
     ar = np.asanyarray(ar)
     if ar.ndim == 1:
         ret = unique1d(ar, return_index=return_index, return_inverse=return_inverse,
-                       return_counts=return_counts, sorting=sorting)
+                       return_counts=return_counts, sorting=sorting, minimal_dtype=minimal_dtype)
         return ret
 
     # axis was specified and not None
@@ -50,19 +50,22 @@ def unique(ar, return_index=False, return_inverse=False,
 
     output = unique1d(consolidated,
                                 return_index=return_index, return_inverse=return_inverse,
-                                return_counts=return_counts, sorting=sorting)
+                                return_counts=return_counts, sorting=sorting, minimal_dtype=minimal_dtype)
     output = (uncoerce_dtype(output[0], orig_shape, orig_dtype, axis),) + output[1:]
     return output
 
 def unique1d(ar, return_index=False, return_inverse=False,
-              return_counts=False, sorting=None):
+              return_counts=False, sorting=None, minimal_dtype=False):
     """
     Find the unique elements of an array, ignoring shape.
     """
     ar = np.asanyarray(ar)
 
     if sorting is None:
-        sorting = ar.argsort(kind='mergesort') # we want to have stable sorts throughout
+        if minimal_dtype:
+            sorting = recast_permutation(ar.argsort(kind='mergesort')) # we want to have stable sorts throughout
+        else:
+            sorting = ar.argsort(kind='mergesort') # we want to have stable sorts throughout
     ar = ar[sorting]
 
     mask = np.empty(ar.shape, dtype=np.bool_)
@@ -84,7 +87,7 @@ def unique1d(ar, return_index=False, return_inverse=False,
 
 def intersection(ar1, ar2,
                 assume_unique=False, return_indices=False,
-                sortings=None, union_sorting=None
+                sortings=None, union_sorting=None, minimal_dtype=False
                 ):
 
     ar1 = np.asanyarray(ar1)
@@ -97,7 +100,7 @@ def intersection(ar1, ar2,
 
     if ar1.ndim == 1:
         ret = intersect1d(ar1, ar2, assume_unique=assume_unique, return_indices=return_indices,
-                          sortings=sortings, union_sorting=union_sorting)
+                          sortings=sortings, union_sorting=union_sorting, minimal_dtype=minimal_dtype)
         return ret
 
     ar1, dtype, orig_shape1, orig_dtype1 = coerce_dtype(ar1)
@@ -109,7 +112,7 @@ def intersection(ar1, ar2,
 
 def intersect1d(ar1, ar2,
                 assume_unique=False, return_indices=False,
-                sortings=None, union_sorting=None
+                sortings=None, union_sorting=None, minimal_dtype=False
                 ):
     """
     Find the intersection of two arrays.
@@ -121,15 +124,15 @@ def intersect1d(ar1, ar2,
     if not assume_unique:
         if return_indices:
             if sortings is not None:
-                ar1, sorting1, ind1 = unique1d(ar1, return_index=True, sorting=sortings[0])
-                ar2, sorting2, ind2 = unique1d(ar2, return_index=True, sorting=sortings[1])
+                ar1, sorting1, ind1 = unique1d(ar1, return_index=True, sorting=sortings[0], minimal_dtype=minimal_dtype)
+                ar2, sorting2, ind2 = unique1d(ar2, return_index=True, sorting=sortings[1], minimal_dtype=minimal_dtype)
             else:
-                ar1, sorting1, ind1 = unique1d(ar1, return_index=True)
-                ar2, sorting2, ind2 = unique1d(ar2, return_index=True)
+                ar1, sorting1, ind1 = unique1d(ar1, return_index=True, minimal_dtype=minimal_dtype)
+                ar2, sorting2, ind2 = unique1d(ar2, return_index=True, minimal_dtype=minimal_dtype)
         else:
             if sortings is not None:
-                ar1, sorting1 = unique1d(ar1, sorting=sortings[0])
-                ar2, sorting2 = unique1d(ar2, sorting=sortings[1])
+                ar1, sorting1 = unique1d(ar1, sorting=sortings[0], minimal_dtype=minimal_dtype)
+                ar2, sorting2 = unique1d(ar2, sorting=sortings[1], minimal_dtype=minimal_dtype)
             else:
                 ar1, sorting1 = unique1d(ar1)
                 ar2, sorting2 = unique1d(ar2)
@@ -138,6 +141,8 @@ def intersect1d(ar1, ar2,
     aux = np.concatenate((ar1, ar2))
     if union_sorting is None:
         aux_sort_indices = np.argsort(aux, kind='mergesort')
+        if minimal_dtype:
+            aux_sort_indices = recast_permutation(aux_sort_indices)
         aux = aux[aux_sort_indices]
     else:
         aux_sort_indices = union_sorting
@@ -293,7 +298,10 @@ def difference1d(ar1, ar2, assume_unique=False, sortings=None, method=None, unio
     in_spec = contained(ar1, ar2, sortings=sortings, union_sorting=union_sorting, assume_unique=True, method=method, invert=True)
     return (ar1[in_spec[0]],) + in_spec[1:]
 
-def find1d(ar, to_find, sorting=None, search_space_sorting=None, return_search_space_sorting=False, check=True):
+def find1d(ar, to_find, sorting=None,
+           search_space_sorting=None, return_search_space_sorting=False,
+           check=True, minimal_dtype=False, missing_val='raise'
+           ):
     """
     Finds elements in an array and returns sorting
     """
@@ -336,11 +344,20 @@ def find1d(ar, to_find, sorting=None, search_space_sorting=None, return_search_s
             else:
                 # print(vals, bad_vals)
                 vals[bad_vals] = -1
+        else:
+            bad_vals = big_vals
+
     else:
         bad_vals = np.full_like(to_find, True)
         vals = np.full_like(vals, -1)
     if check and bad_vals.any():
-        raise IndexError("{} not in array".format(to_find[bad_vals]))
+        if isinstance(missing_val, str) and missing_val == 'raise':
+            raise IndexError("{} not in array".format(to_find[bad_vals]))
+        else:
+            vals[bad_vals] = missing_val
+
+    if minimal_dtype and not bad_vals.any(): # protecting the missings
+        vals = downcast_index_array(vals, ar.shape[-1])
 
     if search_space_sorting is not None:
         vals = vals[search_space_inverse_sorting]
@@ -352,7 +369,7 @@ def find1d(ar, to_find, sorting=None, search_space_sorting=None, return_search_s
 def find(ar, to_find, sorting=None,
          search_space_sorting=None,
          return_search_space_sorting=False,
-         check=True):
+         check=True, minimal_dtype=False, missing_val='raise'):
     """
     Finds elements in an array and returns sorting
     """
@@ -370,7 +387,8 @@ def find(ar, to_find, sorting=None,
     if ar.ndim == 1:
         ret = find1d(ar, to_find, sorting=sorting, check=check,
                      search_space_sorting=search_space_sorting,
-                     return_search_space_sorting=return_search_space_sorting
+                     return_search_space_sorting=return_search_space_sorting,
+                     minimal_dtype=minimal_dtype, missing_val=missing_val
                      )
         return ret
 
@@ -378,7 +396,8 @@ def find(ar, to_find, sorting=None,
     to_find, dtype, orig_shape2, orig_dtype2 = coerce_dtype(to_find, dtype=dtype)
     output = find1d(ar, to_find, sorting=sorting, check=check,
                      search_space_sorting=search_space_sorting,
-                     return_search_space_sorting=return_search_space_sorting
+                     return_search_space_sorting=return_search_space_sorting,
+                     minimal_dtype=minimal_dtype, missing_val=missing_val
                     )
     return output
 

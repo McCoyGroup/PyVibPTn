@@ -74,14 +74,14 @@ class FiniteDifferenceFunction:
             axis = axis + np.arange(dim)
         for i, m, h in zip(axis, self.differences, mesh_spacing):
             if m is not None:
-                vals = m.apply(vals, val_dim = val_dim, axis = i, mesh_spacing = h)
+                vals = m.apply(vals, val_dim=val_dim, axis=i, mesh_spacing=h)
 
         if contract:
             vals = vals.squeeze()
         return vals
 
-    def __call__(self, vals, axes=None, mesh_spacing = None):
-        return self.apply(vals, axes=axes, mesh_spacing = mesh_spacing)
+    def __call__(self, vals, axes=None, mesh_spacing=None):
+        return self.apply(vals, axes=axes, mesh_spacing=mesh_spacing)
 
     @property
     def order(self):
@@ -168,11 +168,11 @@ class FiniteDifferenceFunction:
     @classmethod
     def from_grid(cls,
                   grid, order,
-                  accuracy = 2,
-                  stencil = None,
-                  end_point_accuracy = 2,
-                  axes = 0,
-                  contract = True,
+                  accuracy=2,
+                  stencil=None,
+                  end_point_accuracy=2,
+                  axes=0,
+                  contract=True,
                   **kwargs
                   ):
         """
@@ -239,7 +239,7 @@ class FiniteDifferenceFunction:
                     raise ValueError("finite difference can't be applied to subgrid {} of {}".format(g, grid))
 
                 m = Mesh(g)
-                # print(g[1]-g[0])
+                # raise Exception(..., m.mesh_type)
                 if m.mesh_type == MeshType.Regular:
                     diffs[i] = RegularGridFiniteDifference(
                         o,
@@ -250,6 +250,7 @@ class FiniteDifferenceFunction:
                         **kwargs
                     )
                 elif m.mesh_type is MeshType.Structured:
+                    raise Exception(np.diff(g), np.unique(np.round(np.diff(g), 7)), np.unique(np.round(np.diff(subgrids[0]), 7)))
                     diffs[i] = IrregularGridFiniteDifference(
                         g,
                         o,
@@ -318,25 +319,24 @@ class FiniteDifference1D:
             if check_shape:
                 if self.mat.only_core or self.mat.only_center:
                     shp = len(self.weights[len(self.weights) // 2])
-                else:
-                    shp = max(len(w) for w in self.weights)
-                if shp != vs[0]:
-                    if self.mat.only_core or self.mat.only_center:
-                        raise FiniteDifferenceError(
-                            "FD weights {} with can't be applied to data with shape {} along axis {}".format(
-                                self.weights[len(self.weights) // 2],
-                                self.weights,
-                                vs,
-                                axis
-                            ))
-                    else:
-                        raise FiniteDifferenceError(
-                            "FD weights {} with len {} can't be applied to data with shape {} along axis {}".format(
-                                self.weights,
-                                shp,
-                                vs,
-                                axis
-                            ))
+                    if shp != vs[0]:
+                        if self.mat.only_center:
+                            raise FiniteDifferenceError(
+                                "FD weights {} with can't be applied to data with shape {} along axis {}".format(
+                                    self.weights[len(self.weights) // 2],
+                                    self.weights,
+                                    vs,
+                                    axis
+                                ))
+                # else:
+                #     shp = max(len(w) for w in self.weights)
+                #     raise FiniteDifferenceError(
+                #         "FD weights {} with len {} can't be applied to data with shape {} along axis {}".format(
+                #             self.weights,
+                #             shp,
+                #             vs,
+                #             axis
+                #         ))
             if mesh_spacing is not None:
                 self.mat.mesh_spacing = mesh_spacing
             self.mat.npts = vs[0]
@@ -349,22 +349,22 @@ class FiniteDifference1D:
                 else:
                     shp = max(len(w) for w in self.weights)
                 if shp != vs[axis]:
-                    if self.mat.only_core or self.mat.only_center:
+                    if self.mat.only_center:
                         raise FiniteDifferenceError(
                             "FD weights {} with can't be applied to data with shape {} along axis {}".format(
                                 self.weights[len(self.weights) // 2],
-                                self.weights,
+                                # self.weights,
                                 vs,
                                 axis
                             ))
-                    else:
-                        raise FiniteDifferenceError(
-                            "FD weights {} with len {} can't be applied to data with shape {} along axis {}".format(
-                                self.weights,
-                                shp,
-                                vs,
-                                axis
-                            ))
+                    # else:
+                    #     raise FiniteDifferenceError(
+                    #         "FD weights {} with len {} can't be applied to data with shape {} along axis {}".format(
+                    #             self.weights,
+                    #             shp,
+                    #             vs,
+                    #             axis
+                    #         ))
             if mesh_spacing is not None:
                 self.mat.mesh_spacing = mesh_spacing
             self.mat.npts = vs[axis]

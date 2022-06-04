@@ -4,7 +4,7 @@ Provides stuff like Disk, Sphere, etc. and lets them figure out how to plot them
 """
 
 __all__ = [
-    "GraphicsPrimitive", "Sphere", "Cylinder", "Disk", "Line"
+    "GraphicsPrimitive", "Sphere", "Cylinder", "Disk", "Line", "Text", "Arrow"
 ]
 
 import abc
@@ -76,7 +76,9 @@ class Text(GraphicsPrimitive):
         if isinstance(graphics.figure, VTKWindow):
             raise NotImplemented
         else:
-            return graphics.axes.arrow(self.txt, *self.pos, **self.opts)
+            if hasattr(graphics, 'axes'):
+                graphics = graphics.axes
+            return graphics.text(*self.pos, self.txt, **self.opts)
 
 class Arrow(GraphicsPrimitive):
     def __init__(self, pos1, pos2, **opts):

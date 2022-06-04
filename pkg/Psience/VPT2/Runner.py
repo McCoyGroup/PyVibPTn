@@ -2,16 +2,18 @@
 A little package of utilities for setting up/running VPT jobs
 """
 
-import numpy as np, sys
+import numpy as np, sys, os, itertools, scipy
 
-from McUtils.Scaffolding import ParameterManager
+from McUtils.Data import UnitsData, AtomData
+from McUtils.Scaffolding import ParameterManager, Checkpointer
 from McUtils.Zachary import FiniteDifferenceDerivative
-from McUtils.Combinatorics import PermutationRelationGraph
 
 from ..BasisReps import BasisStateSpace, HarmonicOscillatorProductBasis
 from ..Molecools import Molecule
 
+from .DegeneracySpecs import DegeneracySpec
 from .Hamiltonian import PerturbationTheoryHamiltonian
+from .StateFilters import PerturbationTheoryStateSpaceFilter
 
 __all__ = [
     "VPTRunner",
@@ -22,6 +24,8 @@ __all__ = [
     "VPTRuntimeOptions",
     "VPTSolverOptions"
 ]
+
+__reload_hook__ = ["..BasisRepss", "..Molecools", ".DegeneracySpecs", ".Hamiltonian", ".StateFilters"]
 
 class VPTSystem:
     """
@@ -37,7 +41,8 @@ class VPTSystem:
         "potential_function",
         "order",
         "dipole_derivatives",
-        "dummy_atoms"
+        "dummy_atoms",
+        "eckart_embed"
     )
     def __init__(self,
                  mol,
@@ -48,7 +53,8 @@ class VPTSystem:
                  potential_derivatives=None,
                  potential_function=None,
                  order=2,
-                 dipole_derivatives=None
+                 dipole_derivatives=None,
+                 eckart_embed=False
                  ):
         """
         :param mol: the molecule or system specification to use (doesn't really even need to be a molecule)
@@ -94,11 +100,40 @@ class VPTSystem:
         if mode_selection is not None:
             self.mol.normal_modes.modes = self.mol.normal_modes.modes[mode_selection]
 
+        if eckart_embed is True:
+            self.mol = self.mol.get_embedded_molecule()
+        else:
+            if isinstance(eckart_embed, np.ndarray):
+                ref = self.mol.copy()
+                ref.coords = eckart_embed
+                eckart_embed = ref
+            if isinstance(eckart_embed, Molecule):
+                self.mol = self.mol.get_embedded_molecule(eckart_embed)
+
+
     @property
     def nmodes(self):
+        """
+        Provides the number of modes in the system
+
+        :return:
+        :rtype:
+        """
         return len(self.mol.normal_modes.modes.freqs)
 
     def get_potential_derivatives(self, potential_function, order=2, **fd_opts):
+        """
+        Computes potential derivatives for the given function through finite difference
+
+        :param potential_function:
+        :type potential_function:
+        :param order:
+        :type order:
+        :param fd_opts:
+        :type fd_opts:
+        :return:
+        :rtype:
+        """
         deriv_gen = FiniteDifferenceDerivative(potential_function,
                                                function_shape=((None, None), 0),
                                                stencil=5 + order,
@@ -122,18 +157,42 @@ class VPTStateSpace:
     )
     def __init__(self,
                  states,
-                 degeneracy_specs=None
+                 degeneracy_specs=None,
+                 system=None
                  ):
-        self.state_list = states
-        self.degenerate_states = self.build_degenerate_state_spaces(degeneracy_specs)
+        """
+        :param states: A list of states or a number of quanta to target
+        :type states: list | int
+        :param degeneracy_specs: A specification of degeneracies, either as polyads or explicit groups of states
+        :type degeneracy_specs: list | dict
+        """
+        if not isinstance(states, BasisStateSpace):
+            states = BasisStateSpace(
+                HarmonicOscillatorProductBasis(len(states[0])),
+                states
+            )
+        basis = states.basis
+        self.state_list = states.excitations.tolist()
+        self.degenerate_states = self.build_degenerate_state_spaces(degeneracy_specs, states, system=system)
         if self.degenerate_states is not None:
-            self.degenerate_states = [np.array(x).tolist() for x in self.degenerate_states]
-            states = np.array(self.state_list).tolist()
-            for pair in self.degenerate_states:
-                for p in pair:
-                    if p not in states:
-                        states.append(p)
-            self.state_list = states
+            if isinstance(self.degenerate_states, tuple) and isinstance(self.degenerate_states[0], DegeneracySpec):
+                self.degenerate_states, new_states = self.degenerate_states
+                if isinstance(new_states, BasisStateSpace):
+                    new_states = new_states.excitations.tolist()
+                states = np.asanyarray(self.state_list).tolist()
+                for state in new_states:
+                    if state not in states:
+                        states.append(state)
+                self.states = BasisStateSpace(basis, states)
+                self.state_list = states
+            else:
+                self.degenerate_states = [np.array(x).tolist() for x in self.degenerate_states]
+                states = np.asanyarray(self.state_list).tolist()
+                for pair in self.degenerate_states:
+                    for p in pair:
+                        if p not in states:
+                            states.append(p)
+                self.state_list = states
 
     @classmethod
     def from_system_and_quanta(cls, system, quanta, target_modes=None, only_target_modes=False, **opts):
@@ -160,6 +219,7 @@ class VPTStateSpace:
 
         return cls(
             states,
+            system=system,
             **opts
         )
 
@@ -193,76 +253,64 @@ class VPTStateSpace:
                 whee = [p for p in whee if all(j in target_modes or x == 0 for j,x in enumerate(p))]
         return whee
 
-    @staticmethod
-    def _is_polyad_rule(d, n_modes):
-        try:
-            return (
-                    len(d) == 2
-                    and len(d[0]) == n_modes
-                    and len(d[1]) == n_modes
-            )
-        except TypeError:
-            return False
-
-    def build_degenerate_state_spaces(self, degeneracy_specs):
+    def build_degenerate_state_spaces(self, degeneracy_specs, states, system=None):
         """
-
         :param degeneracy_specs:
         :type degeneracy_specs:
         :return:
         :rtype:
         """
 
-        n_modes = len(self.state_list[0])
-        if degeneracy_specs is None:
+        spec = DegeneracySpec.from_spec(degeneracy_specs)
+        if hasattr(spec, 'frequencies') and spec.frequencies is None:
+            spec.frequencies = system.mol.normal_modes.modes.freqs
+        # raise Exception(spec)
+        if spec is None:
             return None
-        elif isinstance(degeneracy_specs, dict):
-            # dispatch on mode
-            degeneracy_specs = degeneracy_specs.copy()
-            if 'polyads' in degeneracy_specs:
-                polyads = degeneracy_specs['polyads']
-                del degeneracy_specs['polyads']
-                return self.get_degenerate_polyad_space(
-                    self.state_list,
-                    polyads,
-                    **degeneracy_specs
-                )
-            else:
-                NotImplementedError("couldn't infer degenerate space construction mode from spec {}".format(degeneracy_specs))
-        elif all(self._is_polyad_rule(d, n_modes) for d in degeneracy_specs):
-            return self.get_degenerate_polyad_space(
-                self.state_list,
-                degeneracy_specs
-            )
+        elif hasattr(spec, 'prep_states'):
+            return (spec, spec.prep_states(states))
         else:
-            raise NotImplementedError("don't know what to do with degeneracy spec {}".format(degeneracy_specs))
-    @classmethod
-    def get_degenerate_polyad_space(cls, states, polyadic_pairs, max_quanta=None, max_iterations=2, require_converged=False, extra_groups=None):
-        """
-        Gets degenerate spaces by using pairs of transformation rules to
-        take an input state and connect it to other degenerate states
+            return spec.get_groups(states)
 
-        :param states: the input states
-        :type states:
-        :param polyadic_pairs: the transformation rules
-        :type polyadic_pairs:
-        :param max_quanta: the max quanta to allow in connected states
-        :type max_quanta:
+        # elif isinstance(degeneracy_specs, dict):
+        #     # dispatch on mode
+        #     degeneracy_specs = degeneracy_specs.copy()
+        #     if 'polyads' in degeneracy_specs:
+        #         polyads = degeneracy_specs['polyads']
+        #         del degeneracy_specs['polyads']
+        #         return DegenerateMultiStateSpace.get_degenerate_polyad_space(
+        #             self.state_list,
+        #             polyads,
+        #             **degeneracy_specs
+        #         )
+        #     else:
+        #         NotImplementedError(
+        #             "couldn't infer degenerate space construction mode from spec {}".format(degeneracy_specs)
+        #         )
+        # elif all(DegenerateMultiStateSpace._is_polyad_rule(d, n_modes) for d in degeneracy_specs):
+        #     return DegenerateMultiStateSpace.get_degenerate_polyad_space(
+        #         self.state_list,
+        #         degeneracy_specs
+        #     )
+        # else:
+        #     raise NotImplementedError("don't know what to do with degeneracy spec {}".format(degeneracy_specs))
+
+    def filter_generator(self, target_property, order=2):
+        def filter(states):
+            return self.get_state_space_filter(states, target=target_property, order=order)
+        return filter
+    def get_filter(self, target_property, order=2):
+        """
+        Obtains a state space filter for the given target property
+        using the states we want to get corrections for
+
+        :param target_property:
+        :type target_property:
+        :param order:
+        :type order:
         :return:
         :rtype:
         """
-
-        graph = PermutationRelationGraph(polyadic_pairs)
-        groups = graph.build_state_graph(states,
-                                         extra_groups=extra_groups,
-                                         max_sum=max_quanta,
-                                         max_iterations=max_iterations,
-                                         raise_iteration_error=require_converged
-                                         )
-
-        return [g for g in groups if len(g) > 1]
-
-    def get_filter(self, target_property, order=2):
         return self.get_state_space_filter(self.state_list,
                                            target=target_property,
                                            order=order
@@ -288,43 +336,44 @@ class VPTStateSpace:
             else:
                 n_modes = len(states[0])
 
-        if order != 2:
-            raise ValueError("state space filters only implemented at second order")
-
+        # if order != 2:
+        #     raise ValueError("state space filters currently only implemented at second order")
         if target == 'wavefunctions':
             return None
         elif target == 'intensities':
-            return {
-                    (1, 1): (
-                        cls.get_state_list_from_quanta(1, n_modes),
-                        (
-                            cls.get_state_list_from_quanta([2, 3], n_modes),
-                            [
-                                x for x in HarmonicOscillatorProductBasis(n_modes).selection_rules("x", "x", "x")
-                                if sum(x) in [-1, 1]
-                            ]
-                        )
-                    ) if any(sum(s) == 3 for s in states) else cls.get_state_list_from_quanta(2, n_modes),
-                    (2, 0): (
-                        cls.get_state_list_from_quanta(1, n_modes),
-                        (
-                            cls.get_state_list_from_quanta([3], n_modes),
-                            [
-                                x for x in HarmonicOscillatorProductBasis(n_modes).selection_rules("x", "x", "x", "x")
-                                if sum(x) in [-2, 0]#, 2]
-                            ]
-                        ),
-                        (None, [[]])  # selection rules to apply to remainder
-                    ) if any(sum(s) == 3 for s in states) else (
-                        cls.get_state_list_from_quanta(1, n_modes),
-                        (None, [[]])  # selection rules to apply to remainder
-                    )
-            }
+            return PerturbationTheoryStateSpaceFilter.from_property_rules(
+                cls.get_state_list_from_quanta(0, n_modes),
+                states,
+                [
+                    HarmonicOscillatorProductBasis(n_modes).selection_rules(*["x"]*i) for i in range(3, order+3)
+                ],
+                [
+                    HarmonicOscillatorProductBasis(n_modes).selection_rules(*["x"]*i) for i in range(1, order+2)
+                ],
+                order=order
+            )
         elif target == 'frequencies':
-            return {
-                (1, 1): ([],),
-                (2, 0): (None, [[]])
-            }
+            # return {
+            #     (1, 1): ([],),
+            #     (2, 0): (None, [[0]])
+            # }
+            return PerturbationTheoryStateSpaceFilter.from_property_rules(
+                cls.get_state_list_from_quanta(0, n_modes),
+                states,
+                [
+                    HarmonicOscillatorProductBasis(n_modes).selection_rules(*["x"] * i) for i in range(3, order + 3)
+                ],
+                None,
+                order=order
+                # [
+                #     # (),
+                #     # (),
+                #     # ()
+                #     # HarmonicOscillatorProductBasis(n_modes).selection_rules("x"),
+                #     # HarmonicOscillatorProductBasis(n_modes).selection_rules("x", "x"),
+                #     # HarmonicOscillatorProductBasis(n_modes).selection_rules("x", "x", "x")
+                # ]
+            )
 
 class VPTHamiltonianOptions:
     """
@@ -339,15 +388,19 @@ class VPTHamiltonianOptions:
          "kinetic_terms",
          "coriolis_terms",
          "pseudopotential_terms",
+         "dipole_terms",
+         "dipole_derivatives",
          "undimensionalize_normal_modes",
          "use_numerical_jacobians",
          "eckart_embed_derivatives",
+         "eckart_embed_planar_ref_tolerance",
          "strip_dummy_atoms",
          "strip_embedding_coordinates",
          "mixed_derivative_handling_mode",
          "backpropagate_internals",
          "direct_propagate_cartesians",
          "zero_mass_term",
+         "use_internal_modes",
          "internal_fd_mesh_spacing",
          "internal_fd_stencil",
          "cartesian_fd_mesh_spacing",
@@ -360,7 +413,8 @@ class VPTHamiltonianOptions:
          "hessian_tolerance",
          "grad_tolerance",
          "freq_tolerance",
-         "g_derivative_threshold"
+         "g_derivative_threshold",
+         "gmatrix_tolerance"
     )
 
     def __init__(self,
@@ -370,9 +424,12 @@ class VPTHamiltonianOptions:
                  kinetic_terms=None,
                  coriolis_terms=None,
                  pseudopotential_terms=None,
+                 dipole_terms=None,
+                 dipole_derivatives=None,
                  undimensionalize_normal_modes=None,
                  use_numerical_jacobians=None,
                  eckart_embed_derivatives=None,
+                 eckart_embed_planar_ref_tolerance=None,
                  strip_dummy_atoms=None,
                  strip_embedding_coordinates=None,
                  mixed_derivative_handling_mode=None,
@@ -391,7 +448,9 @@ class VPTHamiltonianOptions:
                  hessian_tolerance=None,
                  grad_tolerance=None,
                  freq_tolerance=None,
-                 g_derivative_threshold=None
+                 g_derivative_threshold=None,
+                 gmatrix_tolerance=None,
+                 use_internal_modes=None
                  ):
         """
         :param include_coriolis_coupling: whether or not to include Coriolis coupling in Cartesian normal mode calculation
@@ -452,9 +511,13 @@ class VPTHamiltonianOptions:
             kinetic_terms=kinetic_terms,
             coriolis_terms=coriolis_terms,
             pseudopotential_terms=pseudopotential_terms,
+            dipole_terms=dipole_terms,
+            dipole_derivatives=dipole_derivatives,
             undimensionalize=undimensionalize_normal_modes,
             numerical_jacobians=use_numerical_jacobians,
+            use_internal_modes=use_internal_modes,
             eckart_embed_derivatives=eckart_embed_derivatives,
+            eckart_embed_planar_ref_tolerance=eckart_embed_planar_ref_tolerance,
             strip_dummies=strip_dummy_atoms,
             strip_embedding=strip_embedding_coordinates,
             mixed_derivative_handling_mode=mixed_derivative_handling_mode,
@@ -473,7 +536,8 @@ class VPTHamiltonianOptions:
             hessian_tolerance=hessian_tolerance,
             grad_tolerance=grad_tolerance,
             freq_tolerance=freq_tolerance,
-            g_derivative_threshold=g_derivative_threshold
+            g_derivative_threshold=g_derivative_threshold,
+            gmatrix_tolerance=gmatrix_tolerance
         )
 
         real_opts = {}
@@ -494,6 +558,7 @@ class VPTRuntimeOptions:
         "logger",
         "verbose",
         "checkpoint",
+        "results",
         "memory_constrained",
         "checkpoint_keys",
         "use_cached_representations",
@@ -504,6 +569,7 @@ class VPTRuntimeOptions:
                  logger=None,
                  verbose=None,
                  checkpoint=None,
+                 results=None,
                  parallelizer=None,
                  memory_constrained=None,
                  checkpoint_keys=None,
@@ -543,10 +609,11 @@ class VPTRuntimeOptions:
         self.ham_opts = real_ham_opts
 
         solver_run_opts = dict(
-            operator_chunk_size=operator_chunk_size,
+            # operator_chunk_size=operator_chunk_size,
             memory_constrained=memory_constrained,
             verbose=verbose,
             checkpoint_keys=checkpoint_keys,
+            results=results,
             use_cached_representations=use_cached_representations,
             use_cached_basis=use_cached_basis
         )
@@ -579,6 +646,13 @@ class VPTSolverOptions:
         "zero_element_warning",
         "degenerate_states",
         "zero_order_energy_corrections",
+        "handle_strong_couplings",
+        "strong_coupling_test_modes",
+        "strong_couplings_state_filter",
+        "strongly_coupled_group_filter",
+        "extend_strong_coupling_spaces",
+        "strong_coupling_zero_order_energy_cutoff",
+        "low_frequency_mode_cutoff"
     )
     def __init__(self,
                  order=2,
@@ -596,7 +670,14 @@ class VPTSolverOptions:
                  intermediate_normalization=None,
                  zero_element_warning=None,
                  degenerate_states=None,
-                 zero_order_energy_corrections=None,
+                 handle_strong_couplings=None,
+                 strong_coupling_test_modes=None,
+                 strong_couplings_state_filter=None,
+                 strongly_coupled_group_filter=None,
+                 extend_strong_coupling_spaces=None,
+                 strong_coupling_zero_order_energy_cutoff=None,
+                 low_frequency_mode_cutoff=None,
+                 zero_order_energy_corrections=None
                  ):
         """
         :param order: the order of perturbation theory to apply
@@ -639,6 +720,13 @@ class VPTSolverOptions:
             total_space=total_space,
             flat_total_space=flat_total_space,
             degenerate_states=degenerate_states,
+            handle_strong_couplings=handle_strong_couplings,
+            strong_coupling_test_modes=strong_coupling_test_modes,
+            strong_couplings_state_filter=strong_couplings_state_filter,
+            strongly_coupled_group_filter=strongly_coupled_group_filter,
+            extend_strong_coupling_spaces=extend_strong_coupling_spaces,
+            strong_coupling_zero_order_energy_cutoff=strong_coupling_zero_order_energy_cutoff,
+            low_frequency_mode_cutoff=low_frequency_mode_cutoff,
             state_space_iterations=state_space_iterations,
             state_space_terms=state_space_terms,
             state_space_filters=state_space_filters,
@@ -747,7 +835,12 @@ class VPTRunner:
         )
 
     @classmethod
-    def print_output_tables(cls, wfns=None, file=None, print_intensities=True, sep_char="=", sep_len=100):
+    def print_output_tables(cls, wfns=None, file=None,
+                            print_intensities=True,
+                            print_energies=True,
+                            print_energy_corrections=True,
+                            print_transition_moments=True,
+                            logger=None, sep_char="=", sep_len=100):
         """
         Prints a bunch of formatted output data from a PT run
 
@@ -757,59 +850,67 @@ class VPTRunner:
         :rtype:
         """
 
-        if file is None:
-            file = sys.stdout
-
-        def print_label(label, file=file, **opts):
-            lablen = len(label) + 2
-            split_l = int(np.floor((sep_len - lablen)/2))
-            split_r = int(np.ceil((sep_len - lablen)/2))
-            print(sep_char*split_l, label, sep_char*split_r, **opts, file=file)
-        def print_footer(label=None, file=file, **opts):
-            print(sep_char*sep_len, **opts, file=file)
-
-        print_label("Energy Corrections")
-        print(wfns.format_energy_corrections_table(), file=file)
-        print_footer()
-        if wfns.degenerate_transformation is not None:
-            print_label("Deperturbed Energies")
-            print(wfns.format_deperturbed_energies_table(), file=file)
-            print_footer()
-            print_label("Degenerate Energies")
-            print(wfns.format_energies_table(), file=file)
-            print_footer()
+        if logger is None:
+            logger = wfns.logger
+        if logger is not None:
+            def print_block(label, *args, **kwargs):
+                with wfns.logger.block(tag=label):
+                    wfns.logger.log_print(" ".join("{}".format(x) for x in args), **kwargs)
         else:
-            print_label("States Energies")
-            print(wfns.format_energies_table(), file=file)
-            print_footer()
+            if file is None:
+                file = sys.stdout
+
+            def print_label(label, file=file, **opts):
+                lablen = len(label) + 2
+                split_l = int(np.floor((sep_len - lablen) / 2))
+                split_r = int(np.ceil((sep_len - lablen) / 2))
+                print(sep_char * split_l, label, sep_char * split_r, **opts, file=file)
+
+            def print_footer(label=None, file=file, **opts):
+                print(sep_char * sep_len, **opts, file=file)
+
+            def print_block(label, *args, file=file, **kwargs):
+                print_label(label, file=file, **kwargs)
+                print(*args, file=file, **kwargs)
+                print_footer(file=file, **kwargs)
+
+        if print_energy_corrections:
+            print_block("Energy Corrections", wfns.format_energy_corrections_table())
+        if print_energies:
+            if wfns.degenerate_transformation is not None:
+                print_block("Deperturbed Energies",
+                            wfns.format_deperturbed_energies_table()
+                            )
+                print_block(
+                    "Degenerate Energies",
+                    wfns.format_energies_table()
+                )
+            else:
+                print_block("States Energies",
+                    wfns.format_energies_table()
+                )
 
         if print_intensities:
-            ints = wfns.intensities #
-            if wfns.degenerate_transformation is not None:
-                print_label("Deperturbed IR Data:")
-                for a, m in zip(["X", "Y", "Z"], wfns.format_deperturbed_dipole_contribs_tables()):
-                    print_label("{} Dipole Contributions".format(a))
-                    print(m, file=file)
-                    print_footer()
-                print(wfns.format_deperturbed_intensities_table(), file=file)
-                print_footer()
-                print_label("Degenerate IR Data")
-                for a, m in zip(["X", "Y", "Z"], wfns.format_dipole_contribs_tables()):
-                    print_label("{} Dipole Contributions".format(a))
-                    print(m, file=file)
-                print_footer()
-                print(wfns.format_intensities_table(), file=file)
-                print_footer()
-            else:
-                print_label("IR Data", file=file)
-                for a, m in zip(["X", "Y", "Z"], wfns.format_dipole_contribs_tables()):
-                    print_label("{} Dipole Contributions".format(a))
-                    print(m, file=file)
-                    print_footer()
-                print(wfns.format_intensities_table(), file=file)
-                print_footer()
+            ints = wfns.intensities # to make sure they're computed before printing starts
+            if print_transition_moments:
+                if wfns.degenerate_transformation is not None:
+                    for a, m in zip(["X", "Y", "Z"], wfns.format_deperturbed_dipole_contribs_tables()):
+                        print_block("{} Deperturbed Dipole Contributions".format(a), m)
 
-    def print_tables(self, wfns=None, file=None, print_intensities=True, sep_char="=", sep_len=100):
+                    print_block("Deperturbed IR Data",
+                                wfns.format_deperturbed_intensities_table()
+                                )
+
+                for a, m in zip(["X", "Y", "Z"], wfns.format_dipole_contribs_tables()):
+                    print_block("{} Dipole Contributions".format(a), m)
+            print_block("IR Data", wfns.format_intensities_table())
+
+    def print_tables(self,
+                     wfns=None, file=None,
+                     print_intensities=True,
+                     print_energy_corrections=True,
+                     print_transition_moments=True,
+                     sep_char="=", sep_len=100):
         """
         Prints a bunch of formatted output data from a PT run
 
@@ -823,16 +924,37 @@ class VPTRunner:
             wfns = self.get_wavefunctions()
 
         self.print_output_tables(wfns=wfns, file=file,
-                                 print_intensities=print_intensities, sep_char=sep_char, sep_len=sep_len)
+                                 print_intensities=print_intensities,
+                                 print_energy_corrections=print_energy_corrections,
+                                 print_transition_moments=print_transition_moments,
+                                 sep_char=sep_char, sep_len=sep_len)
+
+        return wfns
 
     @classmethod
-    def run_simple(cls,
-                   system,
-                   states,
-                   target_property=None,
-                   corrected_fundamental_frequencies=None,
-                   **opts
-                   ):
+    def construct(cls,
+               system,
+               states,
+               target_property=None,
+               corrected_fundamental_frequencies=None,
+               **opts
+               ):
+        full_opts = (
+                VPTSystem.__props__
+                + VPTStateSpace.__props__
+                + VPTSolverOptions.__props__
+                + VPTHamiltonianOptions.__props__
+                + VPTRuntimeOptions.__props__
+                + VPTSolverOptions.__props__
+        )
+
+        misses = set(opts.keys()).difference(set(full_opts))
+        if len(misses) > 0:
+            raise ValueError("{}: options {} not valid, full listing is {}".format(
+                cls.__name__,
+                misses,
+                "\n  ".join(("",) + full_opts)
+            ))
 
         par = ParameterManager(**opts)
         sys = VPTSystem(system, **par.filter(VPTSystem))
@@ -845,6 +967,7 @@ class VPTRunner:
         else:
             states = VPTStateSpace(
                 states,
+                system=sys,
                 **par.filter(VPTStateSpace)
             )
 
@@ -852,53 +975,88 @@ class VPTRunner:
         if target_property is None and order == 2:
             target_property = 'intensities'
         if target_property is not None and 'state_space_filters' not in opts:
-            par.ops['state_space_filters'] = states.get_filter(target_property, order=order)
+            if 'expansion_order' in opts.keys():
+                expansion_order = opts['expansion_order']
+            else:
+                expansion_order = order
+            par.ops['state_space_filters'] = states.filter_generator(target_property, order=order)
+
+            # print(par.ops['state_space_filters'])
 
         if corrected_fundamental_frequencies is not None and (
-            'zero_order_energy_corrections' not in opts
-            or opts['zero_order_energy_corrections'] is None
+                'zero_order_energy_corrections' not in opts
+                or opts['zero_order_energy_corrections'] is None
         ):
             par.ops['zero_order_energy_corrections'] = VPTSolverOptions.get_zero_order_energies(
                 corrected_fundamental_frequencies,
                 states.state_list
             )
 
+        hops = VPTHamiltonianOptions(**par.filter(VPTHamiltonianOptions))
+        rops = VPTRuntimeOptions(**par.filter(VPTRuntimeOptions))
+        sops = VPTSolverOptions(**par.filter(VPTSolverOptions))
+
         runner = cls(
             sys,
             states,
-            hamiltonian_options=VPTHamiltonianOptions(**par.filter(VPTHamiltonianOptions)),
-            runtime_options=VPTRuntimeOptions(**par.filter(VPTRuntimeOptions)),
-            solver_options=VPTSolverOptions(**par.filter(VPTSolverOptions))
+            hamiltonian_options=hops,
+            runtime_options=rops,
+            solver_options=sops
+        )
+        return runner, (sys, states, hops, rops, sops)
+    @classmethod
+    def run_simple(cls,
+                   system,
+                   states,
+                   target_property=None,
+                   corrected_fundamental_frequencies=None,
+                   calculate_intensities=True,
+                   **opts
+                   ):
+
+        runner, (system, states, hops, rops, sops) = cls.construct(
+            system,
+            states,
+            target_property=target_property,
+            corrected_fundamental_frequencies=corrected_fundamental_frequencies,
+            **opts
         )
 
         logger = runner.hamiltonian.logger
-        with logger.block(tag="Running Perturbation Theory"):
-            with logger.block(tag="States"):
-                logger.log_print(
-                    states.state_list,
-                    message_prepper=lambda a:str(np.array(a)).splitlines()
-                )
-            with logger.block(tag="Degeneracies"):
-                if states.degenerate_states is None:
-                    logger.log_print("None")
-                else:
-                    for x in states.degenerate_states:
-                        logger.log_print(
-                            x,
-                            message_prepper=lambda a:str(np.array(a)).splitlines()
-                        )
-            with logger.block(tag="Hamiltonian Options"):
-                for k,v in runner.ham_opts.opts.items():
-                    logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
-            with logger.block(tag="Solver Options"):
-                opts = runner.pt_opts.opts
-                for k,v in opts.items():
-                    logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
-            with logger.block(tag="Runtime Options"):
-                opts = dict(runner.runtime_opts.ham_opts, **runner.runtime_opts.solver_opts)
-                for k,v in opts.items():
-                    logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
-            runner.print_tables()
+        with np.printoptions(linewidth=1e8, threshold=1e6):
+            with logger.block(tag="Starting Perturbation Theory Runner"):
+                with logger.block(tag="Hamiltonian Options"):
+                    for k,v in runner.ham_opts.opts.items():
+                        logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
+                with logger.block(tag="Solver Options"):
+                    opts = runner.pt_opts.opts
+                    for k,v in opts.items():
+                        logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
+                with logger.block(tag="Runtime Options"):
+                    opts = dict(runner.runtime_opts.ham_opts, **runner.runtime_opts.solver_opts)
+                    for k,v in opts.items():
+                        logger.log_print("{k}: {v:<100.100}", k=k, v=v, preformatter=lambda *a,k=k,v=v,**kw:dict({'k':k, 'v':str(v)}, **kw))
+
+                with logger.block(tag="States"):
+                    logger.log_print(
+                        states.state_list,
+                        message_prepper=lambda a:str(np.array(a)).splitlines()
+                    )
+                with logger.block(tag="Degeneracies"):
+                    if states.degenerate_states is None:
+                        logger.log_print("None")
+                    else:
+                        ds = states.degenerate_states
+                        if isinstance(ds, list):
+                            for x in states.degenerate_states:
+                                logger.log_print(
+                                    x,
+                                    message_prepper=lambda a:str(np.array(a)).splitlines()
+                                )
+                        else:
+                            logger.log_print(str(ds))
+
+                return runner.print_tables(print_intensities=calculate_intensities)
 
 class VPTStateMaker:
     """
@@ -934,3 +1092,520 @@ class VPTStateMaker:
 
     def __call__(self, *specs, mode=None):
         return self.make_state(*specs, mode=mode)
+
+class AnneInputHelpers:
+
+    @classmethod
+    def _check_file(cls, no_file):
+        if len(no_file.splitlines()) < 2 and '.' in no_file:
+            raise FileNotFoundError("{} is not a file".format(no_file))
+
+    @classmethod
+    def get_tensor_idx(cls, line, inds, m, start_at=0):
+        bits = line.split()
+        idx = tuple(int(i) - 1 for i in bits if '.' not in i)
+        m = max(m, max(idx[start_at:]))
+        val = float(bits[len(idx)])
+        inds[idx] = val
+        return m
+
+    @classmethod
+    def parse_tensor(cls, block, dims=None):
+        inds = {}
+        m = 0
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        m = cls.get_tensor_idx(line, inds, m)
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    m = cls.get_tensor_idx(line, inds, m)
+        if dims is None:
+            m = m + 1
+            n = len(next(iter(inds)))
+            dims = (m,) * n
+        a = np.zeros(dims)
+        for i, v in inds.items():
+            for p in itertools.permutations(i):
+                a[p] = v
+        return a
+    @classmethod
+    def parse_dipole_tensor(cls, block, dims=None):
+        inds = {}
+        m = 0
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        m = cls.get_tensor_idx(line, inds, m, start_at=1)
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    m = cls.get_tensor_idx(line, inds, m, start_at=1)
+        if dims is None:
+            m = m + 1
+            n = len(next(iter(inds)))
+            dims = (3,) + (m,) * (n-1)
+        a = np.zeros(dims)
+        for i, v in inds.items():
+            u = i[0]
+            i = i[1:]
+            for p in itertools.permutations(i):
+                p = (u,) + p
+                a[p] = v
+        # print(">>", a.shape)
+        # a = np.transpose(a, list(range(1, a.ndim)) + [0]) # needs to be innermost I guess...
+        # print(">", a.shape)
+        return a
+
+    @classmethod
+    def parse_freqs_line(cls, line):
+        data = [float(x) for x in line.split()]
+        if len(data) > 0:
+            return np.array(data)
+        else:
+            return None
+
+    @classmethod
+    def parse_modes_line(cls, line, nmodes):
+        data = [float(x) for x in line.split()]
+        if len(data) > 0:
+            l = len(data)
+            n = int(l/nmodes)
+            return np.array(data).reshape(nmodes, n).T
+        else:
+            return None
+
+    @classmethod
+    def parse_modes(cls, block):
+        inds = {}
+        m = 0
+        freqs = None
+        L = None
+        Linv = None
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        if freqs is None:
+                            freqs = cls.parse_freqs_line(line)
+                        elif L is None:
+                            L = cls.parse_modes_line(line, len(freqs))
+                        elif Linv is None:
+                            Linv = cls.parse_modes_line(line, L.shape[1])
+                            break
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    if freqs is None:
+                        freqs = cls.parse_freqs_line(line)
+                    elif L is None:
+                        L = cls.parse_modes_line(line, len(freqs))
+                    elif Linv is None:
+                        Linv = cls.parse_modes_line(line, L.shape[1])
+                        break
+        return freqs, L, Linv
+
+    @classmethod
+    def parse_coords(cls, block):
+        coords = []
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        coords.append([float(x) for x in line.split()])
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    coords.append([float(x) for x in line.split()])
+        return np.array(coords)
+
+    @classmethod
+    def parse_atoms(cls, block):
+        coords = []
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        try:
+                            coords.extend([int(x) for x in line.split()])
+                        except ValueError:
+                            pass
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    try:
+                        coords.extend([int(x) for x in line.split()])
+                    except ValueError:
+                        pass
+        return [AtomData[x]["Symbol"] for x in coords]
+
+    @classmethod
+    def parse_zmatrix(cls, block):
+        _ = 10000
+        zmat = [[0, _, _, _]]
+        n = 1
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        split = line.split()
+                        if len(split) == 4:
+                            split = split[:3]
+                        zmat.append([n] + [int(x)-1 for x in split] + [_]*(3-len(split)))
+                        n += 1
+                    elif len(zmat) > 1:
+                        break
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    split = line.split()
+                    if len(split) == 4:
+                        split = split[:3]
+                    zmat.append([n] + [int(x) - 1 for x in split] + [_] * (3 - len(split)))
+                    n += 1
+                elif len(zmat) > 1:
+                    break
+        return np.array(zmat)
+
+    @classmethod
+    def standard_sorting(cls, zmat):
+        """
+        converts from [r1, r2, r3, ..., a1, a2, ..., t1, t2, ...] coords
+        to standard zmat coords
+        :param zmat:
+        :type zmat:
+        :return:
+        :rtype:
+        """
+        nats = len(zmat)
+        ncoords = 3*nats - 6
+        if nats < 4:
+            return None
+        else:
+            r_coords = [0, 1, 3]
+            a_coords = [2, 4]
+            t_coords = [5]
+            if nats > 4:
+                extra = np.arange(6, ncoords+1)
+                r_coords += extra[::4].tolist()
+                a_coords += extra[1::4].tolist()
+                t_coords += extra[2::4].tolist()
+            return np.argsort(np.concatenate([r_coords, a_coords, t_coords]))
+
+    @classmethod
+    def get_internal_FG(cls, freqs, modes, inv, sorting=None):
+        modes = modes.T * np.sqrt(freqs)[:, np.newaxis]
+        inv = inv.T / np.sqrt(freqs)[np.newaxis, :]
+        G = np.dot(modes.T, modes)
+        # print(np.dot(modes, modes.T))
+        # print(np.dot(modes.T, modes))
+        F = np.dot(np.dot(inv, np.diag(freqs ** 2)), inv.T)
+        if sorting is not None:
+            G = G[np.ix_(sorting, sorting)]
+            # print(G)
+            # print(np.round(F*219465))
+            F = F[np.ix_(sorting, sorting)]
+            # print(F)
+        return F, G
+
+    @classmethod
+    def renormalize_modes(cls, freqs, modes, inv, sorting=None, type=2):
+        if type == 0:
+            modes = modes[sorting, :]
+            inv = inv[:, sorting]
+            modes, inv = inv.T, modes.T
+            freq = freqs
+            # modes = modes / freqs[np.newaxis, :]
+            # inv = inv * freqs[:, np.newaxis]
+        else:
+            F, G = cls.get_internal_FG(freqs, modes, inv, sorting=sorting)
+            if type==1:
+                G = np.linalg.inv(G)
+            freq, modes = scipy.linalg.eigh(F, G, type=type)
+            if type == 2:
+                modes = modes * np.sqrt(freqs)[np.newaxis, :]
+                inv = np.linalg.inv(modes)
+            else:
+                inv = (modes.T / np.sqrt(freqs)[:, np.newaxis])
+                modes = np.linalg.inv(inv)
+        return np.sqrt(freq), modes, inv
+
+    @classmethod
+    def rerotate_force_field(cls, old_inv, new_modes, old_field, dim_skips=0, sorting=None):
+        mid_field = []
+        final = -1 - dim_skips
+        for f in old_field:
+            for i in range(f.ndim - dim_skips):
+                f = np.tensordot(old_inv, f, axes=[1, final])
+                # print(np.round(f*219465))
+            if sorting is not None:
+                f = f[np.ix_(*(sorting,)*(f.ndim - dim_skips) )]
+                # print(np.round(f*219465))
+            mid_field.append(f)
+        new_field = []
+        for f in mid_field:
+            for i in range(f.ndim - dim_skips):
+                f = np.tensordot(new_modes, f, axes=[1, final])
+            new_field.append(f)
+        return new_field, mid_field
+
+    @classmethod
+    def reexpress_normal_modes(cls, base_modes, old_field, dipole, sorting=None, type=2):
+        freq, matrix, inv = cls.renormalize_modes(*base_modes, sorting=sorting, type=type)
+        # print(freq, matrix, inv)
+        # freq, matrix, inv = cls.renormalize_modes(*base_modes, sorting=sorting)
+        potential_terms = cls.rerotate_force_field(
+            base_modes[1],
+            matrix.T,
+            old_field,
+            sorting=sorting
+        )[0]
+        if dipole is not None:
+            # print(dipole[0].shape, base_modes[1].shape, matrix.shape)
+            dipole = [
+                    [0] + cls.rerotate_force_field(
+                        base_modes[1],
+                        matrix.T,
+                        # /np.sqrt(freq)[np.newaxis, :],  # we divide by the sqrt of the frequencies to get the units to work
+                        [d[a] for d in dipole],
+                        sorting=sorting,
+                        dim_skips=1
+                        # [
+                        #     np.diag(freq),  # in the file I was given the frequencies were in Hartree
+                        #     cubics * helpers.convert("Wavenumbers", "Hartrees"),
+                        #     quartics * helpers.convert("Wavenumbers", "Hartrees")
+                        # ]
+                    )[0]
+            for a in range(3)
+            ]
+            # dipole = [np.zeros(3)] + dipole
+        return (freq, matrix, inv), potential_terms, dipole
+
+    # @classmethod
+    # def rephase_normal_modes(cls, ...):
+
+    convert = UnitsData.convert
+    @staticmethod
+    def mass(atom):
+        return AtomData[atom]["Mass"] * UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
+
+
+    @classmethod
+    def run_anne_job(cls, base_dir,
+                     states=2,
+                     calculate_intensities=None,
+                     return_analyzer=False,
+                     return_runner=False,
+                     modes_file='nm_int.dat',
+                     atoms_file='atom.dat',
+                     coords_file='cart_ref.dat',
+                     zmat_file='z_mat.dat',
+                     potential_files=('cub.dat', 'quart.dat', 'quintic.dat', 'sextic.dat'),
+                     dipole_files=('lin_dip.dat', 'quad_dip.dat', "cub_dip.dat", "quart_dip.dat", 'quintic_dip.dat'),
+                     order=None,
+                     expansion_order=None,
+                     energy_units=None,
+                     type=0,
+                     **opts
+                     ):
+        from .Analyzer import VPTAnalyzer
+
+        og_dir = os.getcwd()
+        try:
+            if base_dir is not None:
+                os.chdir(base_dir)
+
+            base_freqs, base_mat, base_inv = cls.parse_modes(modes_file)
+            if energy_units is None:
+                if np.max(base_freqs) > 1:
+                    conv = cls.convert("Wavenumbers", "Hartrees")
+                else:
+                    conv = 1
+            else:
+                conv = cls.convert(energy_units, "Hartrees")
+            base_freqs *= conv
+            potential = [cls.parse_tensor(f) for f in potential_files if os.path.isfile(f)]
+            if energy_units is None:
+                if np.max(np.abs(potential[0])) > 1:
+                    conv = cls.convert("Wavenumbers", "Hartrees")
+                else:
+                    conv = 1
+            else:
+                conv = cls.convert(energy_units, "Hartrees")
+            potential = [t * conv for t in potential]
+            atoms = cls.parse_atoms(atoms_file)
+            coords = cls.parse_coords(coords_file)
+            if zmat_file is None:
+                zmat = None
+            else:
+                zmat = cls.parse_zmatrix(zmat_file)
+            sorting = cls.standard_sorting(zmat)  # we need to re-sort our internal coordinates
+            if os.path.exists(dipole_files[0]):
+                dipole_terms = [cls.parse_dipole_tensor(f) for f in dipole_files if os.path.isfile(f)]
+                # if energy_units is None:
+                #     if np.max(np.abs(potential[0])) > 1:
+                #         conv = cls.convert("Wavenumbers", "Hartrees")
+                #     else:
+                #         conv = 1
+                # else:
+                #     conv = cls.convert(energy_units, "Hartrees")
+            else:
+                dipole_terms = None
+            # raise Exception(sorting)
+            (freq, matrix, inv), potential_terms, dipole_terms = cls.reexpress_normal_modes(
+                (base_freqs, base_mat, base_inv),
+                [np.diag(base_freqs)] + potential,
+                dipole_terms,
+                sorting=sorting,
+                type=type
+            )
+            # if type == 0:
+            #     # (freq, matrix, inv) = (base_freqs, base_mat, base_inv)
+            #     potential_terms = [np.diag(base_freqs)] + potential
+            # if dipole_terms is not None:
+            #     dipole_terms = [
+            #         [0] + [d[a] for d in dipole_terms]
+            #         for a in range(3)
+            #     ]
+
+            if calculate_intensities is None:
+                calculate_intensities = dipole_terms is not None
+
+            # raise Exception(np.diag(potential_terms[0]) * UnitsData.convert("Hartrees", "Wavenumbers"), freq*UnitsData.convert("Hartrees", "Wavenumbers"))
+            if return_analyzer:
+                runner = lambda *a, **kw:VPTAnalyzer.run_VPT(*a, calculate_intensities=calculate_intensities, **kw)
+            elif return_runner:
+                runner = VPTRunner.construct
+            else:
+                runner = lambda *a, **kw:VPTRunner.run_simple(*a, calculate_intensities=calculate_intensities, **kw)
+
+            if expansion_order is None:
+                expansion_order = {}
+            if isinstance(expansion_order, dict):
+                if 'potential' not in expansion_order:
+                    expansion_order['potential'] = len(potential_terms) - 1
+                if 'kinetic' not in expansion_order:
+                    expansion_order['kinetic'] = 2
+                if dipole_terms is not None and 'dipole' not in expansion_order:
+                    expansion_order['dipole'] = len(dipole_terms) - 1
+            if order is None:
+                if isinstance(expansion_order, int):
+                    if expansion_order > 2:
+                        order = expansion_order
+                    else:
+                        order = 2
+                else:
+                    order = expansion_order['potential']
+            # raise Exception([a.shape for a in dipole_terms])
+
+            res = runner(
+                [atoms, coords],
+                states,
+                modes={
+                    "freqs": freq,
+                    "matrix": matrix,
+                    "inverse": inv
+                },
+                potential_terms=potential_terms,
+                dipole_terms=dipole_terms,
+                internals=zmat,
+                order=order,
+                expansion_order=expansion_order,
+                **opts
+            )
+            if return_analyzer:
+                res.print_output_tables(
+                    print_intensities=calculate_intensities,
+                    print_energies=not calculate_intensities
+                )
+
+        finally:
+            os.chdir(og_dir)
+
+        return res
+
+    @classmethod
+    def get_internal_expansion(cls, fchk, internals, states=2, **opts):
+        test_runner, _ = VPTRunner.construct(
+            fchk,
+            states,
+            internals=internals,
+            logger=False
+        )
+        test_freqs = test_runner.hamiltonian.modes.freqs
+        test_V = test_runner.hamiltonian.V_terms
+        test_modes = test_V.internal_L_matrix
+        test_inver = test_V.internal_L_inverse
+        return {
+            "runner":test_runner,
+            "freqs":test_freqs,
+            "molecule":test_runner.hamiltonian.molecule,
+            "kinetic":test_runner.hamiltonian.G_terms,
+            "potential":test_V,
+            "modes":[test_modes, test_inver],
+            "states":states,
+            "fchk":fchk,
+            "zmatrix":internals
+        }
+
+    @classmethod
+    def run_internal_expansion(cls, expansion_data, calculate_intensities=False, **opts):
+        test_V = expansion_data['potential']
+        return VPTRunner.run_simple(
+            expansion_data['fchk'],
+            expansion_data['states'],
+            modes={
+                "freqs": expansion_data['freqs'],
+                "matrix": expansion_data['modes'][0],
+                "inverse": expansion_data['modes'][1]
+            },
+            internals=expansion_data['zmatrix'],
+            potential_terms=[test_V[0], test_V[1], test_V[2]],
+            undimensionalize_normal_modes=False,
+            calculate_intensities=calculate_intensities
+        )
+
+    # @classmethod
+    # def make_nt_polyad(cls, nt):  #this should be of the form num of quanta give same E
+    #     results=[]
+    #     for i in range(len(nt)):
+    #         for j in range(i+1,len(nt)):
+    #             a=nt[i]
+    #             b=nt[j]
+    #             if a <= 0 or b <= 0:
+    #                 continue  # this skips to the next step in the loop
+    #             if a>b:
+    #                 a, b = b, a
+    #                 i, j = j, i
+    #             if b%a==0:
+    #                 b=b//a
+    #                 a=1
+    #             baselist=[0]*len(nt)
+    #             baselist[i]=a
+    #             twolist=[0]*len(nt)
+    #             twolist[j]=b
+    #             results.append([baselist,twolist])
+    #     return results
+
+VPTRunner.helpers = AnneInputHelpers

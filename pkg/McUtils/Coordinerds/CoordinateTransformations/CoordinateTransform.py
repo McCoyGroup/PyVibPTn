@@ -79,9 +79,9 @@ class CoordinateTransform:
         :rtype:
         """
 
-        if isinstance(tf, TransformationFunction):
+        if isinstance(tf, TransformationFunction) or hasattr(tf, 'operate'):
             return tf
-        elif isinstance(tf, CoordinateTransform):
+        elif isinstance(tf, CoordinateTransform) or hasattr(tf, 'transformation_function'):
             return tf.transformation_function
         elif isinstance(tf, str):
             # we can define some convenient transformation syntax, maybe

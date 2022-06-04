@@ -1,6 +1,7 @@
 from .CommonData import DataHandler, DataRecord
 
 __all__ = [ "PotentialData" ]
+__reload_hook__ = [".CommonData"]
 
 class PotentialDataHandler(DataHandler):
     def __init__(self):

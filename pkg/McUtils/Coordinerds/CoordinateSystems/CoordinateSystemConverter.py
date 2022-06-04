@@ -3,7 +3,7 @@ Provides the conversion framework between coordinate systems
 """
 
 from collections import OrderedDict as odict
-import os, abc, numpy as np
+import os, abc, numpy as np, weakref
 from ...Extensions import ModuleLoader
 
 __all__ = [
@@ -22,6 +22,8 @@ class CoordinateSystemConverter(metaclass=abc.ABCMeta):
     """
     A base class for type converters
     """
+
+    converters = None
 
     @property
     @abc.abstractmethod
@@ -55,7 +57,7 @@ class CoordinateSystemConverter(metaclass=abc.ABCMeta):
         """
         pass
 
-    def register(self, where=None):
+    def register(self, where=None, check=True):
         """
         Registers the CoordinateSystemConverter
 
@@ -63,18 +65,17 @@ class CoordinateSystemConverter(metaclass=abc.ABCMeta):
         :rtype:
         """
         if where is None:
-            where = CoordinateSystemConverters
-        where.register_converter(*self.types, self)
+            where = self.converters if not isinstance(self.converters, weakref.ref) else self.converters()
+        where.register_converter(*self.types, self, check=check)
 
 ######################################################################################################
 ##
 ##                                   CoordinateSystemConverters Class
 ##
 ######################################################################################################
-
 class CoordinateSystemConverters:
-    """A coordinate converter class. It's a singleton so can't be instantiated.
-
+    """
+    A coordinate converter class. It's a singleton so can't be instantiated.
     """
 
     converters = odict([])
@@ -84,6 +85,7 @@ class CoordinateSystemConverters:
         "Converters"
     )
     converters_package = ".".join(__name__.split(".")[:-1])
+    converter_type = CoordinateSystemConverter
 
     def __init__(self):
         raise NotImplementedError("{} is a singleton".format(type(self)))
@@ -127,22 +129,28 @@ class CoordinateSystemConverters:
         :return:
         :rtype:
         """
-        from .CartesianToZMatrix import __converters__ as converters
-        for conv in converters:
-            type_pair = tuple(conv.types)
-            self.converters[type_pair] = conv
-        from .ZMatrixToCartesian import __converters__ as converters
-        for conv in converters:
-            type_pair = tuple(conv.types)
-            self.converters[type_pair] = conv
-        if os.path.exists(self.converters_dir):
-            for file in os.listdir(self.converters_dir):
-                self.load_converter(file)
-        self._converters_loaded = True
+
+        if not self._converters_loaded:
+            from .CartesianToZMatrix import __converters__ as converters
+            for conv in converters:
+                type_pair = tuple(conv.types)
+                self.converters[type_pair] = conv
+                self.converters.move_to_end(type_pair)
+            from .ZMatrixToCartesian import __converters__ as converters
+            for conv in converters:
+                type_pair = tuple(conv.types)
+                self.converters[type_pair] = conv
+                self.converters.move_to_end(type_pair)
+            if os.path.exists(self.converters_dir):
+                for file in os.listdir(self.converters_dir):
+                    if os.path.splitext(file)[1] == ".py":
+                        self.load_converter(file)
+            self._converters_loaded = True
 
     @classmethod
     def get_converter(cls, system1, system2):
-        """Gets the appropriate converter for two CoordinateSystem objects
+        """
+        Gets the appropriate converter for two CoordinateSystem objects
 
         :param system1:
         :type system1: CoordinateSystem
@@ -152,14 +160,16 @@ class CoordinateSystemConverters:
         :rtype:
         """
 
-        if not cls._converters_loaded:
-            cls._preload_converters()
+        cls._preload_converters()
 
         try:
             converter = cls.converters[(system1, system2)]
         except KeyError:
             for key_pair, conv in reversed(cls.converters.items()):
-                if isinstance(system1, key_pair[0]) and isinstance(system2, key_pair[1]):
+                if (
+                        (isinstance(system1, key_pair[0]) and isinstance(system2, key_pair[1]))
+                        or system1.name == key_pair[0].name and system2.name == key_pair[1].name
+                ):
                     converter = conv
                     break
             else:
@@ -171,7 +181,7 @@ class CoordinateSystemConverters:
         return converter
 
     @classmethod
-    def register_converter(cls, system1, system2, converter):
+    def register_converter(cls, system1, system2, converter, check=True):
         """Registers a converter between two coordinate systems
 
         :param system1:
@@ -182,11 +192,15 @@ class CoordinateSystemConverters:
         :rtype:
         """
 
-        if not isinstance(converter, CoordinateSystemConverter):
-            raise TypeError('{}: registered converters should be subclasses of {} (got {})'.format(
+        cls._preload_converters()
+        if check and not isinstance(converter, cls.converter_type):
+            raise TypeError('{}: registered converters should be subclasses of {} <{}> (got {} which inherits from {})'.format(
                 cls.__name__,
-                CoordinateSystemConverter,
-                type(converter)
+                cls.converter_type, id(cls.converter_type),
+                type(converter),
+                ["{} <{}>".format(x, id(x)) for x in type(converter).__bases__]
             ))
 
         cls.converters[(system1, system2)] = converter
+
+CoordinateSystemConverter.converters = weakref.ref(CoordinateSystemConverters)

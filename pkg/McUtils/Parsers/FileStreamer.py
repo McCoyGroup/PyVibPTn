@@ -206,7 +206,7 @@ class StringSearchStream(SearchStream):
         if start is None:
             start = self.tell()
         if end is None:
-            end = -1
+            end = len(self._data) + 1
         arg_vec = [tag, start, end]
 
         return self._data.find(*arg_vec)
@@ -238,9 +238,9 @@ class SearchStreamReader:
         self.stream.__exit__(exc_type, exc_val, exc_tb)
 
     def _find_tag(self, tag,
-                  skip_tag = True,
-                  seek = True,
-                  direction = 'forward'
+                  skip_tag=True,
+                  seek=True,
+                  direction='forward'
                   ):
         """
         Finds a tag in a file
@@ -250,7 +250,7 @@ class SearchStreamReader:
         :return: position of tag
         :rtype: int
         """
-        with FileStreamCheckPoint(self, revert = False) as chk:
+        with FileStreamCheckPoint(self, revert=False) as chk:
             if direction == 'forward':
                 pos = self.stream.find(tag)
             else:
@@ -273,8 +273,8 @@ class SearchStreamReader:
 
     def find_tag(self,
                  tag,
-                 skip_tag = None,
-                 seek = None
+                 skip_tag=None,
+                 seek=None
                  ):
         """
         Finds a tag in a file
@@ -301,8 +301,8 @@ class SearchStreamReader:
             seek = tags.seek
         for i, tag in enumerate(tags.tags):
             pos = self._find_tag(tag,
-                                 skip_tag = skip_tag,
-                                 seek = seek
+                                 skip_tag=skip_tag,
+                                 seek=seek
                                  )
             if pos == -1:
                 continue
@@ -340,13 +340,13 @@ class SearchStreamReader:
             if start >= 0:
                 with FileStreamCheckPoint(self):
                     end = self.find_tag(tag_end, seek=False)
-                if end > 0:
+                if end > start:
                     return self.stream.read(end-start)
         else:
             start = self.tell()
             with FileStreamCheckPoint(self):
                 end = self.find_tag(tag_end, seek=False)
-            if end > 0:
+            if end >= start:
                 return self.stream.read(end-start)
 
         # implict None return if no block found
@@ -355,9 +355,9 @@ class SearchStreamReader:
                         tag_start=None,
                         tag_end=None,
                         mode="Single",
-                        parser = None,
-                        parse_mode = "List",
-                        num = None,
+                        parser=None,
+                        parse_mode="List",
+                        num=None,
                         **ignore
                         ):
         """Parses a block by starting at tag_start and looking for tag_end and parsing what's in between them
@@ -367,12 +367,12 @@ class SearchStreamReader:
         :return:
         :rtype:
         """
-        if tag_start is None:
-            raise FileStreamReaderException("{}.{}: needs a '{}' argument".format(
-                type(self).__name__,
-                "parse_key_block",
-                "tag_start"
-            ))
+        # if tag_start is None:
+        #     raise FileStreamReaderException("{}.{}: needs a '{}' argument".format(
+        #         type(self).__name__,
+        #         "parse_key_block",
+        #         "tag_start"
+        #     ))
         if tag_end is None:
             raise FileStreamReaderException("{}.{}: needs a '{}' argument".format(
                 type(self).__name__,

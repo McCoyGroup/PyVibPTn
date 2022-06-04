@@ -1,6 +1,7 @@
 
 import abc, os
 from .Serializers import *
+from .Schema import *
 
 __all__ = [
     "Checkpointer",
@@ -43,6 +44,39 @@ class Checkpointer(metaclass=abc.ABCMeta):
             return cls._ext_map
         else:
             return {c.default_extension:c for c in [JSONCheckpointer, HDF5Checkpointer, NumPyCheckpointer]}
+
+    @classmethod
+    def build_canonical(cls, checkpoint):
+        """
+        Dispatches over types of objects to make a canonical checkpointer
+        from the supplied data
+
+        :param checkpoint: provides
+        :type checkpoint: None | str | Checkpoint | file | dict
+        :return:
+        :rtype: Checkpointer
+        """
+
+        if checkpoint is None:
+            return NullCheckpointer(None)
+        elif isinstance(checkpoint, str):
+            return Checkpointer.from_file(checkpoint)
+        elif Schema(["file"]).validate(checkpoint, throw=False):
+            checkpoint = Schema(["file"], ['keys', 'opts']).to_dict(checkpoint)
+            opts = checkpoint['opts'] if 'opts' in checkpoint else {}
+            if 'keys' in checkpoint:
+                allowed_opts = Schema(['allowed_keys'], ['omitted_keys']).to_dict(checkpoint['keys'], throw=False)
+                if allowed_opts is not None:
+                    opts = dict(opts, **allowed_opts)
+                else:
+                    omitted_opts = Schema(['omitted_keys']).to_dict(checkpoint['keys'], throw=False)
+                    if allowed_opts is not None:
+                        opts = dict(opts, **omitted_opts)
+                    else:
+                        opts['allowed_keys'] = checkpoint['keys']
+            return cls.from_file(checkpoint['file'], **opts)
+        else:
+            return checkpoint
 
     @classmethod
     def from_file(cls, file, **opts):
@@ -149,9 +183,15 @@ class Checkpointer(metaclass=abc.ABCMeta):
                 ))
 
     def __getitem__(self, item):
+        if not self.is_open:
+            with self:
+                return self.__getitem__(item)
         self.check_allowed_key(item)
         return self.load_parameter(item)
     def __setitem__(self, key, value):
+        if not self.is_open:
+            with self:
+                return self.__setitem__(key, value)
         self.check_allowed_key(key)
         self.save_parameter(key, value)
 
@@ -249,6 +289,9 @@ class DumpCheckpointer(Checkpointer):
         return self.backend[key]
 
     def keys(self):
+        if not self.is_open:
+            with self:
+                return self.keys()
         return self.backend.keys()
 
 class JSONCheckpointer(DumpCheckpointer):
@@ -412,10 +455,13 @@ class HDF5Checkpointer(Checkpointer):
         return self.serializer.deserialize(self.stream, key=key)
 
     def keys(self):
+        if not self.is_open:
+            with self:
+                return self.keys()
         file = self.stream
         if not isinstance(file, (self.serializer.api.File, self.serializer.api.Group)):
             file = self.serializer.api.File(file, "a")
-        return file.keys()
+        return list(file.keys())
 
 class DictCheckpointer(Checkpointer):
     """

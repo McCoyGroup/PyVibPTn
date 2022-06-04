@@ -17,18 +17,36 @@ class DataError(KeyError):
 
 class DataHandler:
     """
-    Defines a general data loader class that we can use for AtomData and any other data classes we might find useful
+    Defines a general data loader class that we can use for `AtomData` and any other data classes we might find useful.
     """
     def __init__(self,
                  data_name,
-                 data_key = None,
-                 source_key = None,
-                 data_dir = None,
-                 data_pkg = None,
-                 alternate_keys = None,
-                 getter = None,
-                 record_type = None
+                 data_key=None,
+                 source_key=None,
+                 data_dir=None,
+                 data_pkg=None,
+                 alternate_keys=None,
+                 getter=None,
+                 record_type=None
                  ):
+        """
+        :param data_name: the name of the dataset
+        :type data_name: str
+        :param data_key: the key in the loaded dictionary to use for the actual data (`"data"` by default)
+        :type data_key: str | None
+        :param source_key: the key in the loaded dictionary for the original data source (`"source"` by default)
+        :type source_key: str | None
+        :param data_dir: the main directory data will be loaded from (`.` by default)
+        :type data_dir: str | None
+        :param data_pkg: the python package to load (`TheRealMcCoy` by default)
+        :type data_pkg: str | None
+        :param alternate_keys: alternate keys that can be used to index into the dataset which can will be populated at runtime
+        :type alternate_keys: Iterable[str] | None
+        :param getter: a function to use to resolve a key
+        :type getter: callable | None
+        :param record_type: the class to use for holding data (`DataRecord` by default)
+        :type record_type: type | None
+        """
         if data_dir is None:
             data_dir = default_data_dir
         if data_key is None:
@@ -60,10 +78,18 @@ class DataHandler:
             for k in self._alts:
                 extras.update({a[k]:a for a in self._data.values()}) #shouldn't increase memory bc mutable
             self._data.update(extras)
-    def load(self):
+    def load(self, env=None):
+        """
+        Actually loads the data from `data_file`.
+        Currently set up to just use an `import` statement but should
+        be reimplemented to use a `Deserializer` from `Scaffolding.Serializers`
+
+        :return:
+        :rtype:
+        """
         # currently we only load python data
         # TODO: I should rewrite this to use a Deserializer object...
-        env = {}
+        env = {} if env is None else env
         import sys
         sys.path.insert(0, self._dir) #name needs to be unique enough...
         if self._pkg is None:
@@ -91,9 +117,10 @@ class DataHandler:
     def _get_data(self, key):
         def _get(a, k):
             if k not in a:
-                raise DataError("{}: data source {} doesn't have key {}".format(
+                raise DataError("{}: data source {} doesn't have subkey {} of {}".format(
                     type(self).__name__,
                     self._name,
+                    k,
                     key
                 ))
             return a[k]
@@ -144,8 +171,8 @@ class DataHandler:
 class DataRecord:
     """
     Represents an individual record that might be accessed from a `DataHandler`.
-    Implements _most_ of the `dict` interface, but to make things a bit easier when
-    pickling is not implemented as a proper subclass of `dict`.
+    Implements _most_ of the `dict` interface, but, to make things a bit easier when
+    pickling, is not implemented as a proper subclass of `dict`.
     """
     def __init__(self, data_handler, key, records):
         self.data = records

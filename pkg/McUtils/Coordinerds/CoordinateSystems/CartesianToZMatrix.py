@@ -6,59 +6,13 @@ import numpy as np
 # what properties its class will have and will try to claim that the files don't exist
 
 class CartesianToZMatrixConverter(CoordinateSystemConverter):
-    """A converter class for going from Cartesian coordinates to ZMatrix coordinates
-
+    """
+    A converter class for going from Cartesian coordinates to ZMatrix coordinates
     """
 
     @property
     def types(self):
         return (CartesianCoordinateSystem, ZMatrixCoordinateSystem)
-
-    def canonicalize_order_list(self, ncoords, order_list):
-        """Normalizes the way the ZMatrix coordinates are built out
-
-        :param ncoords:
-        :type ncoords:
-        :param order_list: the basic ordering to apply for the
-        :type order_list: iterable or None
-        :return:
-        :rtype: iterator of int triples
-        """
-        if order_list is None:
-            normalized_list = np.array( (
-                   np.arange(ncoords),
-                   np.arange(-1, ncoords-1),
-                   np.arange(-2, ncoords-2),
-                   np.arange(-3, ncoords-3),
-                ) ).T
-        else:
-            normalized_list = [None] * len(order_list)
-            for i, el in enumerate(order_list):
-                if isinstance(el, int):
-                    spec = (
-                        el,
-                        normalized_list[i-1][0] if i > 0 else -1,
-                        normalized_list[i-2][0] if i > 1 else -1,
-                        normalized_list[i-3][0] if i > 2 else -1
-                    )
-                else:
-                    spec = tuple(el)
-                    # if len(spec) < 4:
-                    #     spec = (i,) + spec + (
-                    #     normalized_list[i-1][0] if i > 0 else -1,
-                    #     normalized_list[i-2][0] if i > 1 else -1,
-                    #     normalized_list[i-3][0] if i > 2 else -1
-                    # )
-                    # spec = spec[:4]
-                    if len(spec) < 4:
-                        raise ValueError(
-                            "Z-matrix conversion spec {} not long enough. Expected ({}, {}, {}, {})".format(
-                                el,
-                                "atomNum", "distAtomNum", "angleAtomNum", "dihedAtomNum"
-                            ))
-
-                normalized_list[i] = spec
-        return np.asarray(normalized_list, dtype=np.int8)
 
     @staticmethod
     def get_dists(points, centers):
@@ -121,29 +75,18 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
         :rtype: np.ndarray
         """
         ncoords = len(coords)
-        orig_ol = self.canonicalize_order_list(ncoords, ordering)
+        orig_ol = ZMatrixCoordinateSystem.canonicalize_order_list(ncoords, ordering)
         ol = orig_ol
         nol = len(ol)
+        ncol = len(ol[0])
+        fsteps = ncoords / nol
+        steps = int(fsteps)
+
+        # print(">> c2z >> ordering:", ol)
 
         multiconfig = nol < ncoords
-        # print(coords)
         if multiconfig:
-            fsteps = ncoords / nol
-            steps = int(fsteps)
-            if steps != fsteps:
-                raise ValueError(
-                    "{}: Number of coordinates {} and number of specifed elements {} misaligned".format(
-                        type(self),
-                        ncoords,
-                        nol
-                    )
-                )
-            # broadcasts a single order spec to be a multiple order spec
-            ol = np.reshape(
-                np.broadcast_to(ol, (steps, nol, 4)) +
-                np.reshape(np.arange(0, ncoords, nol), (steps, 1, 1)),
-                (ncoords, 4)
-            )
+            ol = ZMatrixCoordinateSystem.tile_order_list(ol, ncoords)
             mc_ol = ol.copy()
 
         # we define an order map that we'll index into to get the new indices for a
@@ -202,6 +145,23 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
                 jx = ol[3:, 1]
                 kx = ol[3:, 2]
                 lx = ol[3:, 3]
+                if ol.shape[1] == 5:
+                    raise NotImplementedError("psi angles might be unnecessary")
+                    ix = ix.copy()
+                    jx = jx.copy()
+                    kx = kx.copy()
+                    lx = lx.copy()
+                    fx = ol[3:, 4]
+                    swap_pos = np.where(fx == 1)
+                    swap_i = ix[swap_pos]
+                    swap_j = jx[swap_pos]
+                    swap_k = kx[swap_pos]
+                    swap_l = lx[swap_pos]
+                    ix[swap_pos] = swap_l
+                    jx[swap_pos] = swap_i
+                    kx[swap_pos] = swap_j
+                    lx[swap_pos] = swap_k
+
                 diheds = np.concatenate( (
                     [0, 0],
                     self.get_diheds(coords[ix], coords[jx], coords[kx], coords[lx])
@@ -279,6 +239,24 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
                 jx = ol[mask, 1]
                 kx = ol[mask, 2]
                 lx = ol[mask, 3]
+                if ol.shape[1] == 5:
+                    raise ValueError("Unclear if there is a difference between tau and psi")
+                    ix = ix.copy()
+                    jx = jx.copy()
+                    kx = kx.copy()
+                    lx = lx.copy()
+                    fx = ol[mask, 4]
+                    swap_pos = np.where(fx == 1)
+                    swap_i = ix[swap_pos]
+                    swap_j = jx[swap_pos]
+                    swap_k = kx[swap_pos]
+                    swap_l = lx[swap_pos]
+                    ix[swap_pos] = swap_l
+                    jx[swap_pos] = swap_i
+                    kx[swap_pos] = swap_j
+                    lx[swap_pos] = swap_k
+                # print(ol)
+
                 diheds = self.get_diheds(coords[ix], coords[jx], coords[kx], coords[lx])
                 # pad diheds to be the size of ncoords
                 diheds = np.append(diheds, np.zeros(2*steps))
@@ -313,8 +291,8 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
             # so we need to shift them down and mask out the elements we don't want
             mask = np.repeat(True, ncoords)
             mask[np.arange(0, ncoords, nol)] = False
-            ol = np.reshape(ol[mask], (steps, nol-1, 4))-np.reshape(np.arange(steps), (steps, 1, 1))
-            ol = np.reshape(ol, (ncoords-steps, 4))
+            ol = np.reshape(ol[mask], (steps, nol-1, ncol))-np.reshape(np.arange(steps), (steps, 1, 1))
+            ol = np.reshape(ol, (ncoords-steps, ncol))
             om = np.reshape(om[mask], (steps, nol-1))-nol*np.reshape(np.arange(steps), (steps, 1))-1
             om = np.reshape(om, (ncoords-steps,))
 
@@ -330,18 +308,20 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
             x_axes  = coords[mc_ol[1::nol,  0]] - origins # the first displacement vector
             y_axes  = coords[mc_ol[2::nol,  0]] - origins # the second displacement vector (just defines the x-y plane, not the real y-axis)
             axes = np.array([x_axes, y_axes]).transpose((1, 0, 2))
-
         else:
             origins = coords[ol[0, 1]]
             axes = np.array([coords[ol[0, 0]] - origins, coords[ol[1, 0]] - origins])
 
         ol = orig_ol
         om = om - 1
-        ordering = np.array(
-                [
+        if ncol == 5:
+            ordering = np.array([
+                        np.argsort(ol[:, 0]), om[ol[:, 1]], om[ol[:, 2]], om[ol[:, 3]], ol[:, 4]
+                    ]).T
+        else:
+            ordering = np.array([
                     np.argsort(ol[:, 0]), om[ol[:, 1]], om[ol[:, 2]], om[ol[:, 3]]
-                ]
-            ).T
+                ]).T
         opts = dict(use_rad=use_rad, ordering=ordering, origins=origins, axes=axes)
 
         # if we're returning derivs, we also need to make sure that they're ordered the same way the other data is...

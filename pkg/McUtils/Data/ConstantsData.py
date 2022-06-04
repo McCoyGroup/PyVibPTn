@@ -5,6 +5,7 @@ from .CommonData import DataHandler
 from collections import OrderedDict, deque
 
 __all__ = [ "UnitsData", "UnitsDataHandler" ]
+__reload_hook__ = [".CommonData"]
 
 class ConversionError(Exception):
     pass

@@ -223,8 +223,9 @@ class StructuralProperties:
         coords, com, axes = cls.get_principle_axis_embedded_coords(coords, masses)
         return coords, com, axes
 
+    planar_ref_tolerance=1e-6
     @classmethod
-    def get_eckart_rotations(cls, masses, ref, coords, sel=None, in_paf=False):
+    def get_eckart_rotations(cls, masses, ref, coords, sel=None, in_paf=False, planar_ref_tolerance=None):
         """
         Generates the Eckart rotation that will align ref and coords, assuming initially that `ref` and `coords` are
         in the principle axis frame
@@ -242,6 +243,9 @@ class StructuralProperties:
         if coords.ndim == 2:
             coords = np.broadcast_to(coords, (1,) + coords.shape)
 
+        if planar_ref_tolerance is None:
+            planar_ref_tolerance = cls.planar_ref_tolerance
+
         if not in_paf:
             coords, com, pax_axes = cls.get_principle_axis_embedded_coords(coords, masses)
             ref, ref_com, ref_axes = cls.get_principle_axis_embedded_coords(ref, masses)
@@ -250,20 +254,20 @@ class StructuralProperties:
             com = pax_axes = None
             ref_com = ref_axes = None
 
-
         if sel is not None:
             coords = coords[..., sel, :]
             masses = masses[sel]
             ref = ref[..., sel, :]
 
         real_pos = masses > 0
+        # print(real_pos)
         og_coords = coords
         coords = coords[..., real_pos, :]
         masses = masses[real_pos,]
         og_ref = ref
         ref = ref[..., real_pos, :]
 
-        planar_ref = np.allclose(ref[:, 2], 0., atol=1.0e-8)
+        planar_ref = np.allclose(ref[:, 2], 0., atol=planar_ref_tolerance)
         if not planar_ref:
             # generate pair-wise product matrix
             A = np.tensordot(masses / np.sum(masses),
@@ -313,7 +317,8 @@ class StructuralProperties:
     def get_prop_eckart_transformation(cls, masses, ref, coords,
                                        sel=None,
                                        inverse=False,
-                                       reset_com=False
+                                       reset_com=False,
+                                       planar_ref_tolerance=None
                                        ):
         """
         Computes Eckart transformations for a set of coordinates
@@ -335,7 +340,7 @@ class StructuralProperties:
         # else:
         #     coords = [coords]
 
-        ek_rot, ref_stuff, coord_stuff = cls.get_eckart_rotations(masses, ref, coords, sel=sel, in_paf=False)
+        ek_rot, ref_stuff, coord_stuff = cls.get_eckart_rotations(masses, ref, coords, sel=sel, in_paf=False, planar_ref_tolerance=planar_ref_tolerance)
         ref, ref_com, ref_rot = ref_stuff
         crd, crd_com, crd_rot = coord_stuff
 
@@ -362,7 +367,8 @@ class StructuralProperties:
     def get_eckart_embedded_coords(cls, masses,
                                    ref, coords,
                                    reset_com=False,
-                                   sel=None
+                                   sel=None,
+                                   planar_ref_tolerance=None
                                    ):
         """
         Embeds a set of coordinates in the reference frame
@@ -383,7 +389,7 @@ class StructuralProperties:
             masses = masses[sel]
             ref = ref[..., sel, :]
 
-        ek_rot, ref_stuff, coord_stuff = cls.get_eckart_rotations(masses, ref, coords, in_paf=False)
+        ek_rot, ref_stuff, coord_stuff = cls.get_eckart_rotations(masses, ref, coords, in_paf=False, planar_ref_tolerance=planar_ref_tolerance)
         ref, ref_com, ref_rot = ref_stuff
         crd, crd_com, crd_rot = coord_stuff
 
@@ -760,7 +766,7 @@ class MolecularProperties:
         return StructuralProperties.get_prop_principle_axis_rotation(mol.coords, mol.masses, sel=sel, inverse=inverse)
 
     @classmethod
-    def eckart_embedding_data(cls, mol, coords, sel=None):
+    def eckart_embedding_data(cls, mol, coords, sel=None, planar_ref_tolerance=None):
         """
 
         :param mol:
@@ -775,10 +781,10 @@ class MolecularProperties:
         masses = mol.masses
         ref = mol.coords
         coords = CoordinateSet(coords)
-        return StructuralProperties.get_eckart_embedding_data(masses, ref, coords, sel=sel)
+        return StructuralProperties.get_eckart_embedding_data(masses, ref, coords, sel=sel, planar_ref_tolerance=planar_ref_tolerance)
 
     @classmethod
-    def eckart_transformation(cls, mol, ref_mol, sel=None, inverse=False):
+    def eckart_transformation(cls, mol, ref_mol, sel=None, inverse=False, planar_ref_tolerance=None):
         """
 
         :param ref_mol: reference geometry
@@ -797,10 +803,10 @@ class MolecularProperties:
                 m1,
                 m2
             ))
-        return StructuralProperties.get_prop_eckart_transformation(m1, ref_mol.coords, mol.coords, sel=sel, inverse=inverse)
+        return StructuralProperties.get_prop_eckart_transformation(m1, ref_mol.coords, mol.coords, sel=sel, inverse=inverse, planar_ref_tolerance=planar_ref_tolerance)
 
     @classmethod
-    def eckart_embedded_coords(cls, mol, coords, sel=None):
+    def eckart_embedded_coords(cls, mol, coords, sel=None, planar_ref_tolerance=None):
         """
 
         :param mol:
@@ -815,7 +821,7 @@ class MolecularProperties:
         masses = mol.masses
         ref = mol.coords
         coords = CoordinateSet(coords)
-        return StructuralProperties.get_eckart_embedded_coords(masses, ref, coords, sel=sel)
+        return StructuralProperties.get_eckart_embedded_coords(masses, ref, coords, sel=sel, planar_ref_tolerance=planar_ref_tolerance)
 
     @classmethod
     def translation_rotation_eigenvectors(cls, mol, sel=None):
@@ -1397,6 +1403,7 @@ class DipoleSurfaceManager(PropertyManager):
                 parse = gr.parse(keys)
 
             mom, grad = tuple(parse[k] for k in keys[:2])
+            grad = grad.array
             seconds = thirds = None
             num_grad = num_secs = None
 
@@ -1448,11 +1455,12 @@ class DipoleSurfaceManager(PropertyManager):
         if new._surf is not None:
             new._surf = new._surf.transform(transf)
         if new._derivs is not None:
-            rot_dip = transf.transformation_function.transform@new._derivs[0]
-            new._derivs = (
-                    (rot_dip,) +
+            tf = transf.transformation_function.transform
+            base_derivs = (
+                    (new._derivs[0],) +
                     tuple(new._transform_derivatives(new._derivs[1:], transf))
             )
+            new._derivs = tuple(np.tensordot(d, tf, axes=[-1, -1]) for d in base_derivs)
         return new
 
     def insert_atoms(self, atoms, coords, where):
@@ -1867,8 +1875,8 @@ class NormalModesManager(PropertyManager):
         mode_basis = modes.matrix
         rot_analytic = np.dot(d1_analytic.T, mode_basis)
 
-        rot_analytic = np.array([x/np.linalg.norm(x) for x in rot_analytic])
-        d1_numerical = np.array([x/np.linalg.norm(x) for x in d1_numerical.T])
+        rot_analytic = np.nan_to_num(np.array([x/np.linalg.norm(x) for x in rot_analytic]), nan=0.0)
+        d1_numerical = np.nan_to_num(np.array([x/np.linalg.norm(x) for x in d1_numerical.T]), nan=0.0)
 
         # could force some orientation relative to PAX frame?
         # dot each into each other

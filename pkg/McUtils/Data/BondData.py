@@ -1,6 +1,7 @@
 from .CommonData import DataHandler, DataError
 
 __all__ = [ "BondData", "BondDataHandler" ]
+__reload_hook__ = [".CommonData"]
 
 class BondDataHandler(DataHandler):
     """

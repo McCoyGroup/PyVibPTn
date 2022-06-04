@@ -1,5 +1,9 @@
 """
-Provides a small data framework for wrapping up datasets into classes for access and loading
+Provides a small data framework for wrapping up datasets into classes for access and loading.
+
+The basic structure for a new dataset is defined in `CommonData.DataHandler`.
+A simple, concrete example is in `AtomData.AtomData`.
+A slightly more involved example is in `ConstantsData.UnitsData`.
 """
 
 __all__ = []

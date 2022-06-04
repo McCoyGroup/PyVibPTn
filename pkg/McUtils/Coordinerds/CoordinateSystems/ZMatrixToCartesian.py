@@ -60,6 +60,7 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
         :return:
         :rtype:
         """
+
         # make sure we have the ordering stuff in hand
         if ordering is None:
            ordering, coordlist = self.default_ordering(coordlist)
@@ -74,7 +75,7 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
             missing = coordlist.shape[:dim_diff]
             ordering = np.broadcast_to(ordering, missing + ordering.shape )
 
-        if ordering.shape[-1] == 4:
+        if ordering.shape[-1] > 3:
             atom_ordering = ordering[:, :, 0]
             ordering = ordering[:, 1:, 1:]
         else:
@@ -120,14 +121,16 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
 
         dists = coordlist[:, 0, 0]
         if return_derivs:
-            der_stuff = cartesian_from_rad_derivatives(origins, x_pts, y_pts, dists, None, None,
-                                                         0,
-                                                         np.full((len(dists),), -1, dtype=int),
-                                                         np.full((len(dists),), -1, dtype=int),
-                                                         np.full((len(dists),), -1, dtype=int),
-                                                         derivs,
-                                                         order=return_deriv_order
-                                                         )
+            der_stuff = cartesian_from_rad_derivatives(origins,
+                                                       x_pts, y_pts, dists,
+                                                       None, None,
+                                                       0,
+                                                       np.full((len(dists),), -1, dtype=int),
+                                                       np.full((len(dists),), -1, dtype=int),
+                                                       np.full((len(dists),), -1, dtype=int),
+                                                       derivs,
+                                                       order=return_deriv_order
+                                                       )
             total_points[:, 1] = der_stuff[0]
             if return_deriv_order > 0:
                 derivs[1][np.arange(sysnum), :1, :, 1, :] = der_stuff[1]
@@ -137,6 +140,8 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
         else:
             ref_points_1, _ = cartesian_from_rad(origins, x_pts, y_pts, dists, None, None)
             total_points[:, 1] = ref_points_1
+
+        # print(">> z2c >> ordering", ordering[0])
 
          # iteratively build the rest of the coords with one special cases for n=2
         for i in range(1, coordnum):
@@ -156,14 +161,23 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
                 refs3 = y_pts
                 dihed = None
                 ref_coords3 = np.full((len(dists),), -1, dtype=int)
+                psi_flag = False
             else:
                 ref_coords3 = ordering[:, i, 2] # reference atom numbers for dihedral ref coordinate
                 refs3 = total_points[np.arange(sysnum), ref_coords3.astype(int)] # get the actual reference coordinates for the dihed
                 dihed = coordlist[:, i, 2] # pull proper dihedral values
                 if not use_rad:
                     dihed = np.deg2rad(dihed)
+                if ordering.shape[-1] == 4:
+                    raise ValueError("Unclear if there is a difference between tau and psi")
+                    psi_flag = ordering[:, i, 3] == 1
+                    # dihed[psi_flag] = -dihed[psi_flag]
+                else:
+                    psi_flag = False
 
             if return_derivs:
+                if ordering.shape[-1] == 4:
+                    raise NotImplementedError("don't have derivatives for case with psi angles")
                 der_stuff = cartesian_from_rad_derivatives(
                     refs1, refs2, refs3,
                     dists, angle, dihed,
@@ -182,7 +196,7 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
                 if return_deriv_order > 1:
                     derivs[2][np.arange(sysnum), :i+1, :, :i+1, :, i+1, :] = der_stuff[2]
             else:
-                ref_points_1, _ = cartesian_from_rad(refs1, refs2, refs3, dists, angle, dihed)
+                ref_points_1, _ = cartesian_from_rad(refs1, refs2, refs3, dists, angle, dihed, psi=psi_flag)
                 total_points[:, i+1] = ref_points_1
 
         if atom_ordering is not None:

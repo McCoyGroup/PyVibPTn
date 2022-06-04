@@ -17,6 +17,7 @@ class LogLevel(enum.Enum):
     Warnings = 1
     Normal = 10
     Debug = 50
+    MoreDebug = 75
     All = 100
     Never = 1000 # for debug statements that should really be deleted but I'm too lazy to
 
@@ -51,7 +52,7 @@ class LoggingBlock:
         {
             'opener': ">>" + "-" * 25 + ' {tag} ' + "-" * 25,
             'prompt': "::{meta} ",
-            'closer': '<<'
+            'closer': '>>'+'-'*50+'<<'
         },
         {
             'opener': "::> {tag}",
@@ -159,6 +160,18 @@ class Logger:
         if print_function is None:
             print_function = print
         self.print_function = print_function
+
+    def to_state(self, serializer=None):
+        return {
+            'log_file': self.log_file,
+            'verbosity': self.verbosity,
+            'padding': self.padding,
+            'newline': self.newline,
+            'print_function': None if self.print_function is print else self.print_function
+        }
+    @classmethod
+    def from_state(cls, state, serializer=None):
+        return cls(**state)
 
     def block(self, **kwargs):
         return LoggingBlock(self, block_level=self.block_level, **kwargs)
@@ -315,6 +328,7 @@ class Logger:
 
             if log_level <= self.verbosity:
                 log = self.log_file
+                msg = self.format_message(message, meta=self.format_metainfo(metainfo), preformatter=preformatter , **kwargs)
                 if isinstance(log, str):
                     if not os.path.isdir(os.path.dirname(log)):
                         try:
@@ -323,11 +337,11 @@ class Logger:
                             pass
                     #O_NONBLOCK is *nix only
                     with open(log, mode="a", buffering=1 if print_options['flush'] else -1) as lf: # this is potentially quite slow but I am also quite lazy
-                        print_function(self.format_message(message, meta=self.format_metainfo(metainfo), **kwargs), file=lf, **print_options)
+                        print_function(msg, file=lf, **print_options)
                 elif log is None:
-                    print_function(self.format_message(message, meta=self.format_metainfo(metainfo), preformatter=preformatter, **kwargs), **print_options)
+                    print_function(msg, **print_options)
                 else:
-                    print_function(self.format_message(message, meta=self.format_metainfo(metainfo), preformatter=preformatter, **kwargs), file=log, **print_options)
+                    print_function(msg, file=log, **print_options)
 
     def __repr__(self):
         return "{}({}, {})".format(
@@ -416,6 +430,7 @@ class LogParser(FileStreamReader):
         def line_iterator(self, pattern=""):
             og_settings = self.parent.get_block_settings(self.depth)
             prompt = og_settings['prompt'].format(meta="") + pattern
+            raise NotImplementedError('Never finished the line iterator')
 
         def parse_prompt_blocks(self, chunk, prompt):
             splitsies = chunk.split("\n" + prompt)
@@ -440,17 +455,24 @@ class LogParser(FileStreamReader):
             lines = []
 
             with StringStreamReader(self.data) as parser:
-                header = parser.parse_key_block("", {"tag":opener, "skip_tag":False})
+                header = parser.parse_key_block(None, {"tag":opener, "skip_tag":False})
                 if header is not None:
                     lines.extend(self.parse_prompt_blocks(header, prompt))
-                    block = parser.parse_key_block("", closer)
+                    block = parser.parse_key_block(None, {"tag":closer, "skip_tag":True})
+                    if block is None:
+                        raise ValueError("unclosed block found at position {} in stream '{}'".format(parser.tell(), parser.read()))
                     lines.append(self.make_subblock(block))
+                    # print("??", parser.stream.read(1))
                     while header is not None:
-                        header = parser.parse_key_block("", {"tag":opener, "skip_tag":False})
+                        header = parser.parse_key_block(None, {"tag":opener, "skip_tag":False})
+                        curp = parser.tell()
                         if header is None:
                             break #
                         lines.extend(self.parse_prompt_blocks(header, prompt))
-                        block = parser.parse_key_block("", closer)
+                        block = parser.parse_key_block(None, {"tag":closer, "skip_tag":True})
+                        if block is None:
+                            parser.seek(curp)
+                            raise ValueError("unclosed block found at position {} in stream (from block '{}')".format(curp, parser.read(-1)))
                         lines.append(self.make_subblock(block))
 
                 rest = parser.stream.read()
@@ -458,18 +480,18 @@ class LogParser(FileStreamReader):
 
             tag_start = og_settings['opener'].split("{tag}", 1)[0]
             tag_end = og_settings['opener'].split("{tag}", 2)[-1]
-            if tag_start == "":
-                if tag_end == "":
-                    tag = lines[0].strip()
-                else:
-                    tag = lines[0].split(tag_end)[0].strip()
-            elif tag_end == "":
-                tag = lines[0].split(tag_start, 1)[-1].strip()
+            tag = lines[0]
+            if tag_start != "":
+                tag = tag.split(tag_start, 1)[-1]
+            if tag_end != "":
+                tag = tag.split(tag_end)[0]
             else:
-                tag = lines[0].split(tag_start, 1)[-1].split(tag_end)[0].strip()
+                tag = tag.split("\n")[0]
+            tag = tag.strip()
 
             block_end = "\n" + og_settings['closer'].split("{tag}", 1)[0]
-            lines[-1] = lines[-1].split(block_end, 1)[0]
+            if isinstance(lines[-1], str):
+                lines[-1] = lines[-1].split(block_end, 1)[0]
 
             return tag, lines[1:]
 

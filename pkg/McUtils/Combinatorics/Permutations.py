@@ -561,7 +561,7 @@ class UniquePermutations:
             return storage
 
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True, cache=True)
     def _fill_permutations_direct_jit(storage, inds, partition, dim):
         """
         Builds off of this algorithm for generating permutations
@@ -791,7 +791,7 @@ class UniquePermutations:
         inds[sn] = tree_data[cur_dim, 0]
 
     @staticmethod
-    @jit(nopython=True, parallel=True)
+    @jit(nopython=True, parallel=True, cache=True)
     def _fill_permutation_indices(
             inds: np.ndarray,
             perms: np.ndarray,
@@ -993,7 +993,7 @@ class UniquePermutations:
         return inds
 
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True, cache=True)
     def _fill_permutations_from_indices(perms, indices, counts, classes, dim, num_permutations, block_size):
 
         # we make a constant-time lookup for what a value maps to in
@@ -1168,7 +1168,7 @@ class UniquePermutations:
 
     # leaving this here so I remember how it works...
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True, cache=True)
     def _walk_perm_generator(counts, dim, num_permutations, indices, include_positions):
 
         tree_data = np.zeros((dim, 2), dtype=np.int64)
@@ -1701,10 +1701,14 @@ class IntegerPartitionPermutations:
                 for d, g in zip(partition_data, groups)
             ]
             if dtype is None:
-                dtype = _infer_dtype(np.max([np.max(s) for s in ushifts]) + np.max(totals))
+                tets_val = np.max([np.max(s) for s in ushifts]) + np.max(totals) + 1
+                dtype = _infer_dtype(tets_val)
             subinds = [
                 (g.astype(dtype) + s) for g,s in zip(ushifts, totals)
             ]
+            # for s in subinds:
+            #     if np.any(s < 0):
+            #         raise ValueError('overflow on {} from {}'.format(s, dtype))
 
         # raise Exception(groups, subinds)
 
@@ -1927,7 +1931,7 @@ class SymmetricGroupGenerator:
         :rtype:
         """
 
-        if isinstance(n, int):
+        if isinstance(n, (int, np.integer)):
             n = [n]
 
         partitioners, counts = self._get_partition_perms(n)
@@ -1976,10 +1980,14 @@ class SymmetricGroupGenerator:
         groups = np.split(perms, inds)[1:]
 
         partitioners, shifts = self._get_partition_perms(usums)
-        perms_inds = [p.get_partition_permutation_indices(g, assume_standard=assume_standard,
+        perms_inds = [p.get_partition_permutation_indices(g,
+                                                 assume_standard=assume_standard,
                                                  preserve_ordering=preserve_ordering,
                                                  check_partition_counts=check_partition_counts) for p, g in zip(partitioners, groups) ]
         if dtype is None:
+        #     for i,p in enumerate(perms_inds):
+        #         if np.any(p < 0):
+        #             raise ValueError("dtype overflow on {}".format(groups[i]))
             dtype = _infer_dtype(np.max([np.max(p) for p in perms_inds]) + np.max(shifts))
         subinds = [ (g.astype(dtype) + s) for g,s in zip(perms_inds, shifts) ]
         indices = np.concatenate(subinds, axis=0)
@@ -2127,7 +2135,7 @@ class SymmetricGroupGenerator:
     # from memory_profiler import profile
     # @profile
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True, cache=True)
     def _get_filter_mask(new_rep_perm, cls_inds, can_be_negative, class_negs):
         # if we run into negatives we need to mask them out
         not_negs = np.full(len(cls_inds), True)#, dtype=bool)
@@ -2137,7 +2145,7 @@ class SymmetricGroupGenerator:
         return not_negs
 
     @staticmethod
-    @jit(nopython=True)
+    @jit(nopython=True, cache=True)
     def _filter_negs_by_comp(comp, not_negs, idx, idx_starts, mask, perm_counts, start, end):
         not_sel = np.where(np.logical_not(not_negs))[0]
         mask_inds = np.reshape(
@@ -3261,6 +3269,14 @@ class PermutationRelationGraph:
 
     @classmethod
     def merge_groups(cls, groups):
+        """
+        This really needs to be cleaned up...
+
+        :param groups:
+        :type groups:
+        :return:
+        :rtype:
+        """
 
         num_groups = np.inf
         while len(groups) < num_groups:

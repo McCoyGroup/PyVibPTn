@@ -87,7 +87,7 @@ class Molecule(AbstractMolecule):
         self._coords = coords
         self._sys = MolecularCartesianCoordinateSystem(self)
         self._coords = CoordinateSet(self._coords, self._sys)
-        if not zmatrix is None:
+        if zmatrix is not None:
             zmatrix = np.asanyarray(zmatrix).astype(int)
             if zmatrix.shape[1] != 4:
                 raise ValueError("can't understand Z-matrix {}".format(zmatrix))
@@ -449,6 +449,7 @@ class Molecule(AbstractMolecule):
         if self._ints is None and self._zmat is not None:
             zms = MolecularZMatrixCoordinateSystem(self, ordering=self._zmat)
             # print(zms)
+            # print(zms, self.coords, self.coords.system.converter(zms))
             self._ints = self.coords.convert(zms)
         return self._ints
     @property
@@ -526,7 +527,7 @@ class Molecule(AbstractMolecule):
         """
         return self.prop('principle_axis_data')
 
-    def eckart_frame(self, mol, sel=None, inverse=False):
+    def eckart_frame(self, mol, sel=None, inverse=False, planar_ref_tolerance=None):
         """
         Gets the Eckart frame(s) for the molecule
         :param mol:
@@ -538,9 +539,9 @@ class Molecule(AbstractMolecule):
         :return:
         :rtype: MolecularTransformation
         """
-        return self.prop('eckart_transformation', mol, sel=sel, inverse=inverse)
+        return self.prop('eckart_transformation', mol, sel=sel, inverse=inverse, planar_ref_tolerance=planar_ref_tolerance)
 
-    def embed_coords(self, crds, sel=None):
+    def embed_coords(self, crds, sel=None, planar_ref_tolerance=None):
         """
         Embeds coords in the Eckart frame using `self` as a reference
         :param crds:
@@ -549,7 +550,7 @@ class Molecule(AbstractMolecule):
         :rtype:
         """
 
-        return self.prop('eckart_embedded_coords', crds, sel=sel)
+        return self.prop('eckart_embedded_coords', crds, sel=sel, planar_ref_tolerance=planar_ref_tolerance)
     def get_embedding_data(self, crds, sel=None):
         """
         Gets the necessary data to embed crds in the Eckart frame using `self` as a reference
@@ -757,6 +758,10 @@ class Molecule(AbstractMolecule):
              objects = False,
              **plot_ops
              ):
+
+        if mode == 'jupyter':
+            return self.jupyter_viz()
+
         from McUtils.Plots import Graphics3D, Sphere, Cylinder, Line, Disk
 
         if len(geometries) == 0:
@@ -845,6 +850,17 @@ class Molecule(AbstractMolecule):
 
         return figure, atoms, bonds
 
+    def jupyter_viz(self):
+        from McUtils.Jupyter import MoleculeGraphics
+
+        return MoleculeGraphics(self.atoms,
+                                np.ndarray.view(self.coords.convert(CartesianCoordinates3D)),
+                                bonds=self.bonds
+                                )
+    def to_widget(self):
+        return self.jupyter_viz().to_widget()
+    def _ipython_display_(self):
+        return self.jupyter_viz()._ipython_display_()
     #endregion
 
     #region External Program Properties

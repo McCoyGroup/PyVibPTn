@@ -63,6 +63,9 @@ class GraphicsPropertyManager:
             self.axes.set_title("")
         elif isinstance(label, Styled):
             self.axes.set_title(*label.val, **label.opts)
+        elif Styled.could_be(label):
+            label = Styled.construct(label)
+            self.axes.set_title(*label.val, **label.opts)
         else:
             self.axes.set_title(label)
 
@@ -73,12 +76,31 @@ class GraphicsPropertyManager:
     @plot_legend.setter
     def plot_legend(self, legend):
         self._plot_legend = legend
-        if legend is None:
-            self.axes.set_label("")
-        elif isinstance(legend, Styled):
-            self.axes.set_label(*legend.val, **legend.opts)
-        else:
-            self.axes.set_label(legend)
+        artists = self.graphics.artists
+        if artists is not None:
+            if legend is None:
+                for a in artists:
+                    a.remove_label("")
+            elif legend is True:
+                pass
+            elif isinstance(legend, Styled):
+                for a in artists:
+                    a.set_label(legend.val, **legend.opts)
+            elif Styled.could_be(legend):
+                legend = Styled.construct(legend)
+                for a in artists:
+                    a.set_label(legend.val, **legend.opts)
+            else:
+                for a in artists:
+                    a.set_label(legend)
+
+    # # set axes labels
+    # @property
+    # def axes(self):
+    #     return self._axes
+    # @axes.setter
+    # def axes(self, axes):
+    #     ...
 
     # set axes labels
     @property
@@ -98,11 +120,17 @@ class GraphicsPropertyManager:
             self.axes.set_xlabel("")
         elif isinstance(xlab, Styled):
             self.axes.set_xlabel(*xlab.val, **xlab.opts)
+        elif Styled.could_be(xlab):
+            xlab = Styled.construct(xlab)
+            self.axes.set_xlabel(*xlab.val, **xlab.opts)
         else:
             self.axes.set_xlabel(xlab)
         if ylab is None:
             self.axes.set_ylabel("")
         elif isinstance(ylab, Styled):
+            self.axes.set_ylabel(*ylab.val, **ylab.opts)
+        elif Styled.could_be(ylab):
+            ylab = Styled.construct(ylab)
             self.axes.set_ylabel(*ylab.val, **ylab.opts)
         else:
             self.axes.set_ylabel(ylab)
@@ -131,9 +159,15 @@ class GraphicsPropertyManager:
 
         if isinstance(x, Styled):  # name feels wrong here...
             self.axes.set_xlim(*x.val, **x.opts)
+        elif Styled.could_be(x):
+            x = Styled.construct(x)
+            self.axes.set_xlim(*x.val, **x.opts)
         elif x is not None:
             self.axes.set_xlim(x)
         if isinstance(y, Styled):
+            self.axes.set_ylim(*y.val, **y.opts)
+        elif Styled.could_be(y):
+            y = Styled.construct(y)
             self.axes.set_ylim(*y.val, **y.opts)
         elif y is not None:
             self.axes.set_ylim(y)
@@ -146,6 +180,13 @@ class GraphicsPropertyManager:
         import matplotlib.ticker as ticks
 
         if isinstance(x, Styled):
+            self._set_ticks(*x.val,
+                            set_ticks=set_ticks,
+                            set_locator=set_locator, set_minor_locator=set_minor_locator,
+                            **x.opts
+                            )
+        elif Styled.could_be(x):
+            x = Styled.construct(x)
             self._set_ticks(*x.val,
                             set_ticks=set_ticks,
                             set_locator=set_locator, set_minor_locator=set_minor_locator,
@@ -233,13 +274,16 @@ class GraphicsPropertyManager:
     @frame_style.setter
     def frame_style(self, f_style):
         if self._frame_style is None:
-            self._frame_style = ((None,) * 2)*2
+            self._frame_style = ((None, None), (None, None))
         if isinstance(f_style, dict):
             f_style = ((f_style, f_style), (f_style, f_style))
+
         try:
             x, y = f_style
         except ValueError:
             x, y = f_style = (f_style, f_style)
+        # else:
+        #     print(">", x, y)
         if isinstance(y, dict):
             y = (y, y)
         if isinstance(x, dict):
@@ -253,8 +297,9 @@ class GraphicsPropertyManager:
         else:
             l = r = x
 
-        self._ticks_label_style = ((l, r), (b, t))
+        self._frame_style = ((l, r), (b, t))
         lax, rax, bax, tax = self.axes.spines.values()
+        # print(l, r, b, t)
         for a,o in zip((lax, rax, bax, tax), (l, r, b, t)):
             if o is not None:
                 a.set(**o)
@@ -341,6 +386,7 @@ class GraphicsPropertyManager:
 
             self._image_size = (w, h)
             if not self.managed:
+                # print(w, wi, hi)
                 self.figure.set_size_inches(wi, hi)
 
     # set background color
@@ -395,12 +441,18 @@ class GraphicsPropertyManager:
 
         if isinstance(x, Styled):
             self.axes.set_xscale(*x.val, **x.opts)
+        elif Styled.could_be(x):
+            x = Styled.construct(x)
+            self.axes.set_xscale(*x.val, **x.opts)
         elif x is not None:
             self.axes.set_xscale(x)
         if isinstance(y, Styled):
             self.axes.set_yscale(*y.val, **y.opts)
         elif y is not None:
             self.axes.set_yscale(y)
+        elif Styled.could_be(y):
+            y = Styled.construct(y)
+            self.axes.set_yscale(*y.val, **y.opts)
 
     @property
     def padding(self):
@@ -534,6 +586,9 @@ class GraphicsPropertyManager3D(GraphicsPropertyManager):
             self.axes.set_xlabel("")
         elif isinstance(xlab, Styled):
             self.axes.set_xlabel(*xlab.val, **xlab.opts)
+        elif Styled.could_be(xlab):
+            xlab = Styled.construct(xlab)
+            self.axes.set_xlabel(*xlab.val, **xlab.opts)
         else:
             self.axes.set_xlabel(xlab)
 
@@ -541,12 +596,18 @@ class GraphicsPropertyManager3D(GraphicsPropertyManager):
             self.axes.set_ylabel("")
         elif isinstance(ylab, Styled):
             self.axes.set_ylabel(*ylab.val, **ylab.opts)
+        elif Styled.could_be(ylab):
+            ylab = Styled.construct(ylab)
+            self.axes.set_ylabel(*ylab.val, **ylab.opts)
         else:
             self.axes.set_ylabel(ylab)
 
         if zlab is None:
             self.axes.set_zlabel("")
         elif isinstance(zlab, Styled):
+            self.axes.set_zlabel(*zlab.val, **zlab.opts)
+        elif Styled.could_be(zlab):
+            zlab = Styled.construct(zlab)
             self.axes.set_zlabel(*zlab.val, **zlab.opts)
         else:
             self.axes.set_zlabel(zlab)

@@ -224,6 +224,8 @@ class DerivativeGenerator:
 
     @staticmethod
     def _default_displace(c, a):
+        if not isinstance(a, (int, float, np.integer, np.floating)):
+            a = a[c % len(a)]
         return a
 
     @staticmethod
@@ -243,7 +245,7 @@ class DerivativeGenerator:
                 only_core=False,
                 only_center=True,
                 contract=True,
-                mesh_spacing = mesh_spacing,
+                mesh_spacing=mesh_spacing,
                 **self.fd_opts
             )
             self._fdfs[(dorder, mesh_spacing)] = fdf
@@ -289,7 +291,7 @@ class DerivativeGenerator:
         orders = pairs[sorting, 1]
         return tuple(orders)
 
-    def get_displacement(self, coord, mesh_spacing = None):
+    def get_displacement(self, coord, mesh_spacing=None):
         """
         Computes the displacement for the passed mesh spacing
 
@@ -302,7 +304,7 @@ class DerivativeGenerator:
         """
         if mesh_spacing is None:
             mesh_spacing = self.mesh_spacing
-        displacement = self.displacement_function(coord, mesh_spacing)
+        displacement = self.displacement_function(self._coord_index(coord)[0], mesh_spacing)
         if isinstance(displacement, (float, np.float)):
             displacement = np.full(self.coord_shape, displacement)
         elif displacement.shape == self.coord_shape[-1:]:
@@ -421,7 +423,8 @@ class DerivativeGenerator:
         for spec in specs: # dumb for now but allows me to pick some optimal ordering in the future
             # print(" >>>>>", spec)
             ci = self._coord_index(spec)
-            fd_data = self._get_fdf(ci, self.mesh_spacing)
+            h = self.displacement_function(ci[0], self.mesh_spacing)
+            fd_data = self._get_fdf(ci, h)
             # print("   ::", ci, fd_data[0], fd_data[1])
             disp_data = self._get_displaced_coords(spec, fd_data[0], fd_data[1])
             # print("   ::", disp_data[0], disp_data[1].shape)

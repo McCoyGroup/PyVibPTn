@@ -4,13 +4,15 @@ provide a single unified interface for doing certain types of projects.
 
 All of the McUtils packages stand mostly on their own, but there will be little calls into one another here and there.
 
-The more scientifically-focused `Psience` package makes significant use of `McUtils`.
+The more scientifically-focused `Psience` package makes significant use of `McUtils` as do various packages that have
+been written over the years.
 """
 
 import McUtils.Data
 import McUtils.Parsers
 import McUtils.GaussianInterface
 import McUtils.Misc
+import McUtils.Jupyter
 import McUtils.Plots
 import McUtils.Zachary
 import McUtils.Coordinerds
@@ -18,7 +20,6 @@ import McUtils.ExternalPrograms
 import McUtils.Extensions
 
 __all__ = [
-    "Misc",
     "Parsers",
     "Extensions",
     "Plots",
@@ -29,5 +30,7 @@ __all__ = [
     "GaussianInterface",
     "Numputils",
     "Scaffolding",
-    "Parallelizers"
+    "Parallelizers",
+    "Jupyter",
+    "Misc"
 ]

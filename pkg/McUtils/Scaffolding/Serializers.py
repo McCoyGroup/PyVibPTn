@@ -3,7 +3,7 @@ Provides scaffolding for creating serializers that dump data to a reloadable for
 Light-weight and unsophisticated, but that's what makes this useful..
 """
 
-import abc, numpy as np, json, io, pickle, importlib, types, base64
+import abc, numpy as np, json, io, pickle, importlib, base64, types
 from collections import OrderedDict
 
 __all__= [
@@ -38,10 +38,16 @@ class PseudoPickler:
         self.protocol=protocol
         self.b64encode=b64encode
 
-    _primitive_types = (int, float, bool, str, np.integer, np.floating, np.bool)
+    _primitive_types = (int, float, bool, str,
+                        np.integer, np.floating, np.bool
+                        )
     _list_types = (tuple, list)
     _dict_types = (dict, OrderedDict)
-    _importable_types = (type, types.MethodType, types.ModuleType)
+    _importable_types = (type, #types.MethodType, types.ModuleType,
+                         bytes, bytearray, memoryview,
+                         np.dtype
+                         )
+    _safe_modules = ["numpy", "multiprocessing"]
     def _to_state(self, obj, cache):
         """
         Tries to extract state for `obj` by walking through the
@@ -75,8 +81,9 @@ class PseudoPickler:
             return type(obj)((k, self.serialize(v, cache)) for k,v in obj.items())
         elif isinstance(obj, self._importable_types):
             return self._to_importable_state(obj)
+        elif self._can_import(obj):
+            return self._to_importable_state(obj)
         else:
-
             objid = id(obj)
             if objid in cache:
                 raise ValueError("multiple references to single object not allowed ({} already written)".format(obj))
@@ -84,7 +91,12 @@ class PseudoPickler:
             try:
                 odict = dict(obj.__dict__)
             except AttributeError:
-                raise Exception(obj)
+                raise_err = True
+            else:
+                raise_err = False
+
+            if raise_err:
+                raise ValueError("can't psuedopickle object of type {} (not a primitive nor supporting `obj.__dict__`): {}".format(type(obj), obj))
 
             return self.serialize(odict, cache=cache)
 
@@ -99,6 +111,12 @@ class PseudoPickler:
             "pseudopickle_protocol": self.protocol,
             "pickle_data": dump
         }
+    def _can_import(self, obj):
+        # print(type(obj).__module__)
+        return (
+                type(obj).__module__.split(".")[0] in self._safe_modules
+                or isinstance(obj, types.BuiltinFunctionType)
+        )
 
     def to_state(self, obj, cache=None):
         """
@@ -359,7 +377,7 @@ class YAMLSerializer(BaseSerializer):
         data = data.data
         self.api.dump(data, file, **kwargs)
     def deserialize(self, file, key=None, **kwargs):
-        dat = self.api.load(file)
+        dat = self.api.unshare(file)
         dat = self.deconvert(dat)
         if key is not None:
             if '/' in key:
@@ -379,33 +397,45 @@ class NDarrayMarshaller:
     """
 
     def __init__(self,
+                 base_serializer=None,
                  allow_pickle=True,
                  psuedopickler=None,
                  allow_records=False,
                  all_dicts=False,
                  converters=None
                  ):
+
+        self.parent=base_serializer
         self.allow_pickle = allow_pickle
         if allow_pickle and psuedopickler is None:
             psuedopickler = PseudoPickler(b64encode=True)
+        self._seen_cache = None
         self.psuedopickler = psuedopickler
         self.all_dicts = all_dicts
         self.allow_records = allow_records
-        if converters is None:
-            converters = self.default_converter_dispatch
-        self.converter_dispatch = converters
+        self._converter_dispatch = converters
 
     # we define a converter layer that will coerce everything to NumPy arrays
-    atomic_types = (str, int, float, bool, np.floating, np.integer, np.bool)
-    default_converter_dispatch = OrderedDict((
-        ((np.ndarray,), lambda data, cls: cls._iterable_to_numpy(data)),
-        ('to_state', lambda x, s: s._psuedo_pickle_to_numpy(x)),
-        ('asarray', lambda data, cls: cls._iterable_to_numpy(data.asarray())),
-        ((type(None),), lambda x, cls: cls._none_to_none(x)),
-        (atomic_types, lambda x, cls: cls._literal_to_numpy(x)),
-        ((dict,), lambda data, cls: cls._dict_to_numpy(data)),
-        ((list, tuple), lambda data, cls: cls._iterable_to_numpy(data))
-    ))
+    atomic_types = PseudoPickler._primitive_types
+
+    @classmethod
+    def get_default_converters(self):
+        return OrderedDict((
+            ((np.ndarray,), lambda data, cls: cls._iterable_to_numpy(data)),
+            ('to_state', lambda x, s: s._psuedo_pickle_to_numpy(x)),
+            ('asarray', lambda data, cls: cls._iterable_to_numpy(data.asarray())),
+            ((type(None),), lambda x, cls: cls._none_to_none(x)),
+            (self.atomic_types, lambda x, cls: cls._literal_to_numpy(x)),
+            ((dict,), lambda data, cls: cls._dict_to_numpy(data)),
+            ((list, tuple), lambda data, cls: cls._iterable_to_numpy(data))
+        ))
+
+    @property
+    def converter_dispatch(self):
+        if self._converter_dispatch is None:
+            return self.get_default_converters()
+        else:
+            return self._converter_dispatch
 
     @classmethod
     def _literal_to_numpy(cls, data):
@@ -447,7 +477,13 @@ class NDarrayMarshaller:
                         if not try_numpy: break
 
                 if try_numpy:
-                    arr = np.array(data)
+                    np.warnings.filterwarnings('error', category=np.VisibleDeprecationWarning)
+                    try:
+                        arr = np.array(data)
+                    except np.VisibleDeprecationWarning:
+                        arr = np.empty(shape=(len(data),), dtype=object)
+                        for i, v in enumerate(data):
+                            arr[i] = v
                 else:
                     arr = np.empty(shape=(len(data),), dtype=object)
                     for i, v in enumerate(data):
@@ -489,8 +525,32 @@ class NDarrayMarshaller:
         else:
             return arr
 
+    class _pickle_cache:
+        def __init__(self, parent):
+            self.parent = parent
+            self.tree = []
+            self.parents = set()
+        def __call__(self, key):
+            self.add(key)
+            return self
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            self.pop()
+            if len(self.parents) == 0:
+                self.parent._seen_cache = None
+        def add(self, key):
+            if id(key) in self.parents:
+                raise RecursionError("conversion on object of type {} hit an infinite recusion: {}".format(type(key), key))
+            self.parents.add(id(key))
+            self.tree.append(id(key))
+        def pop(self):
+            self.parents.remove(self.tree.pop())
     def _psuedo_pickle_to_numpy(self, data):
-        data = self.psuedopickler.serialize(data)
+        if self._seen_cache is None:
+            self._seen_cache = self._pickle_cache(self)
+        with self._seen_cache(data):
+            data = self.psuedopickler.serialize(data)
         # return self._convert(data, allow_pickle=False)
         return self.convert(data)
 
@@ -523,7 +583,7 @@ class NDarrayMarshaller:
                     break
 
             if converter is None and allow_pickle:
-                converter = lambda x, s: s._psuedo_pickle_to_numpy(x)
+                converter = self._default_convert
 
             if converter is None:
                 raise TypeError("no registered converter to coerce {} into HDF5 compatible format".format(data))
@@ -533,6 +593,10 @@ class NDarrayMarshaller:
 
         finally:
             self.allow_pickle = cur_pickle
+
+    @staticmethod
+    def _default_convert(x, converter):
+        return converter._psuedo_pickle_to_numpy(x)
 
     def deconvert(self, data):
         """
@@ -549,7 +613,9 @@ class NDarrayMarshaller:
         if hasattr(data, 'items'):
             res = {}
             for k, v in data.items():
-                res[k] = self.deconvert(v)
+                if self.parent is not None:
+                    v = self.parent.deconvert(v)
+                res[k] = v
             if '_list_numitems' in res:
                 # actually an iterable but with inconsistent shape
                 n_items = res['_list_numitems']
@@ -557,7 +623,12 @@ class NDarrayMarshaller:
             elif list(res.keys()) == ['_data']:  # special case for if we just saved a single array to file
                 res = res['_data']
         elif not isinstance(data, np.ndarray):
-            res = [self.deconvert(v) for v in data]
+            try:
+                iter(data)
+            except TypeError:
+                res = data
+            else:
+                res = [self.parent.deconvert(v) if self.parent is not None else v for v in data]
         else:
             res = data
 
@@ -589,8 +660,7 @@ class HDF5Serializer(BaseSerializer):
     This restricts what we can serialize, but generally in insignificant ways.
     """
     default_extension = ".hdf5"
-    converter_dispatch = NDarrayMarshaller.default_converter_dispatch
-    def __init__(self, allow_pickle=True, psuedopickler=None):
+    def __init__(self, allow_pickle=True, psuedopickler=None, converters=None):
         import h5py as api
         self.api = api
         self.allow_pickle = allow_pickle
@@ -598,10 +668,11 @@ class HDF5Serializer(BaseSerializer):
             psuedopickler = PseudoPickler(b64encode=True)
         self.psuedopickler = psuedopickler
         self.marshaller = NDarrayMarshaller(
+            self,
             allow_pickle=allow_pickle,
             psuedopickler=psuedopickler,
             all_dicts=True,
-            converters=self.converter_dispatch
+            converters=converters
         )
 
     def convert(self, data):
@@ -792,13 +863,24 @@ class NumPySerializer(BaseSerializer):
 
     # we define a converter layer that will coerce everything to NumPy arrays
     atomic_types = (str, int, float)
-    converter_dispatch = OrderedDict((
+    converter_dispatch = None
+    @classmethod
+    def get_default_converters(self):
+        return OrderedDict((
         ((np.ndarray,), lambda data, cls: data),
         ('asarray', lambda data, cls: data.asarray()),
-        (atomic_types, lambda x, cls: cls._literal_to_numpy(x)),
+        (self.atomic_types, lambda x, cls: cls._literal_to_numpy(x)),
         ((dict,), lambda data, cls: cls._dict_to_numpy(data)),
         ((list, tuple), lambda data, cls: cls._iterable_to_numpy(data))
     ))
+
+    @classmethod
+    def get_converters(self):
+        if self.converter_dispatch is None:
+            return self.get_default_converters()
+        else:
+            return self.converter_dispatch
+
 
     @classmethod
     def _literal_to_numpy(cls, data):
@@ -828,7 +910,7 @@ class NumPySerializer(BaseSerializer):
         :rtype:
         """
         converter = None
-        for k, f in cls.converter_dispatch.items():
+        for k, f in cls.get_converters().items():
             if isinstance(k, tuple):  # check if we're dispatching based on type
                 if isinstance(data, k):
                     converter = f

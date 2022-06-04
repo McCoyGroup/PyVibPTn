@@ -6,12 +6,10 @@ Defines useful extended internal coordinate frames
 
 import numpy as np
 import McUtils.Numputils as nput
-
 from McUtils.Coordinerds import (
     ZMatrixCoordinateSystem, CartesianCoordinateSystem, CoordinateSystemConverter,
     ZMatrixCoordinates, CartesianCoordinates3D, CoordinateSet, CoordinateSystemConverters
 )
-
 from .MoleculeInterface import AbstractMolecule
 
 __all__ = [
@@ -453,7 +451,7 @@ class MolecularCartesianToZMatrixConverter(CoordinateSystemConverter):
         return zmcs, opts
 
 MolecularCartesianToZMatrixConverter = MolecularCartesianToZMatrixConverter()
-MolecularCartesianToZMatrixConverter.register()
+MolecularCartesianToZMatrixConverter.register(CoordinateSystemConverters)
 
 class MolecularCartesianToRegularCartesianConverter(CoordinateSystemConverter):
     """
@@ -484,6 +482,7 @@ class MolecularZMatrixToCartesianConverter(CoordinateSystemConverter):
                      reembed=False, axes_choice=None, return_derivs=None,
                      strip_dummies=False,
                      strip_embedding=True,
+                     planar_ref_tolerance=None,
                      **kwargs):
         """
         Converts from Cartesian to ZMatrix coords, attempting to preserve the embedding
@@ -537,11 +536,11 @@ class MolecularZMatrixToCartesianConverter(CoordinateSystemConverter):
             embed_carts = carts[..., 3:, :]
             reembed = not (
                     carts.squeeze().ndim == 2 and
-                    np.allclose(molecule.coords, carts, atol=1.0e-5)
+                    np.allclose(molecule.coords, embed_carts, atol=1.0e-5)
             ) # agree to like a ten thousandth of an angstrom
             if reembed:
                 if not return_derivs:
-                    embed_carts = molecule.embed_coords(embed_carts)
+                    embed_carts = molecule.embed_coords(embed_carts, planar_ref_tolerance=planar_ref_tolerance)
                     carts = np.concatenate([
                         carts[..., :3, :],
                         embed_carts

@@ -3,6 +3,8 @@ Provides the operator representations needed when building a Hamiltonian represe
 I chose to only implement direct product operators. Not sure if we'll need a 1D base class...
 """
 
+import tracemalloc
+
 import numpy as np, scipy.sparse as sp, os, tempfile as tf, time, gc
 from collections import OrderedDict
 from McUtils.Numputils import SparseArray
@@ -220,7 +222,6 @@ class Operator:
         elif len(ind_grps) == 1:
             # totally symmetric so we can just sort and delete the dupes
             flat = np.sort(flat, axis=1)
-            return np.unique(flat, axis=0, return_inverse=True)
         else:
             # if indices are shared between groups we can't do anything about them
             # so we figure out where there are overlaps in indices
@@ -248,7 +249,20 @@ class Operator:
             symmetrized = np.concatenate(symmetriz_grps, axis=1)[:, reordering]
             flat[indep_grps] = symmetrized
 
-            return np.unique(flat, axis=0, return_inverse=True)
+        # next pull the unique indices
+        uinds_basic, inverse = np.unique(flat, axis=0, return_inverse=True)
+
+        # Finally apply a lexical sorting so that we
+        # can do as little work as possible later since work can be shared between (0,0,0) and (0,0,1) but not
+        # (1, 1, 0)
+
+        indsort = np.lexsort(uinds_basic.T)
+        # raise Exception(indsort.shape, uinds_basic.shape)
+        uinds = uinds_basic[indsort]
+        # if len(uinds) > 500:
+        #     raise Exception(inds, uinds)
+
+        return uinds, (inverse, np.argsort(indsort))
 
     def _mat_prod_operator_terms(self, inds, funcs, states, sel_rules):
         """
@@ -417,9 +431,12 @@ class Operator:
             non_orthog = np.arange(nstates)
 
 
+        def return_empty():
+            return sp.csr_matrix((1, nstates), dtype='float')
+
         # if none of the states are non-orthogonal...just don't calculate anything
         if len(non_orthog) == 0:
-            return sp.csr_matrix((1, nstates), dtype='float')
+            return return_empty()
         else:
             if isinstance(funcs, (list, tuple)):
                 chunk, all_sels = self._mat_prod_operator_terms(inds, funcs, states, sel_rules)
@@ -433,14 +450,14 @@ class Operator:
                 non_orthog = non_orthog[all_sels,]
 
             if chunk is None:
-                return sp.csr_matrix((1, nstates), dtype='float')
+                return return_empty()
 
             # if check_orthogonality:
             # finally we make sure that everything we're working with is
             # non-zero because it'll buy us time on dot products later
             non_zero = np.where(np.abs(chunk) >= self.zero_threshold)[0]
             if len(non_zero) == 0:
-                return sp.csr_matrix((1, nstates), dtype='float')
+                return return_empty()
             chunk = chunk[non_zero,]
             non_orthog = non_orthog[non_zero,]
 
@@ -448,7 +465,7 @@ class Operator:
                 (
                     chunk,
                     (
-                        np.zeros(len(non_zero)),
+                        np.zeros(len(non_zero), dtype='int8'),
                         non_orthog
                     )
                 ), shape=(1, nstates))
@@ -530,19 +547,27 @@ class Operator:
         """
 
         inds = parallelizer.scatter(inds)
+        # print(f"Num inds={len(idx)}")
+        parallelizer.print("evaluating over inds of shape {s}", s=inds.shape, log_level=parallelizer.logger.LogLevel.Debug)
+        start = time.time()
         dump = self._get_pop_sequential(inds, idx, save_to_disk=False, check_orthogonality=check_orthogonality)
-        parallelizer.print("gathering inds of shape {}".format(inds.shape), log_level=parallelizer.logger.LogLevel.Debug)
+        end = time.time()
+        parallelizer.print("took {t:.3f}s", t=end-start, log_level=parallelizer.logger.LogLevel.Debug)
         res = parallelizer.gather(dump)
+        parallelizer.print("gather took {t:.3f}s", t=time.time()-end, log_level=parallelizer.logger.LogLevel.Debug)
         if isinstance(res, np.ndarray):
-            parallelizer.print("got res of shape {}".format(res.shape), log_level=parallelizer.logger.LogLevel.Debug)
-        # parallelizer.print(res)
+            parallelizer.print("got res of shape {s}", s=res.shape, log_level=parallelizer.logger.LogLevel.Debug)
         if parallelizer.on_main:
             res = self._load_arrays(res)
 
         return res
 
     @Parallelizer.main_restricted
-    def _main_get_elements(self, inds, idx, parallelizer=None, check_orthogonality=True):
+    # @profile
+    def _main_get_elements(self, inds, idx,
+                           parallelizer=None,
+                           check_orthogonality=True,
+                           ):
         """
         Implementation of get_elements to be run on the main process...
 
@@ -556,6 +581,11 @@ class Operator:
 
         # we expect this to be an iterable object that looks like
         # num_modes X [bra, ket] X quanta
+        try:
+            idx = idx.obj # shared proxy deref
+        except AttributeError:
+            pass
+
         if not isinstance(idx, BraKetSpace):
             self.logger.log_print("constructing BraKet space")
             idx = BraKetSpace.from_indices(idx, quanta=self.quanta)
@@ -564,7 +594,7 @@ class Operator:
             self.logger.log_print("evaluating identity tensor over {} elements".format(len(idx)))
             new = self._get_eye_tensor(idx)
         else:
-            mapped_inds, inverse = self.filter_symmetric_indices(inds)
+            mapped_inds, inv_dat = self.filter_symmetric_indices(inds)
             if parallelizer is not None and not isinstance(parallelizer, SerialNonParallelizer):
                 self.logger.log_print("evaluating {nel} elements over {nind} unique indices using {cores} processes".format(
                     nel=len(idx),
@@ -579,14 +609,15 @@ class Operator:
                 ))
                 res = self._get_pop_sequential(mapped_inds, idx, check_orthogonality=check_orthogonality)
 
-            if inverse is not None:
-                res = res.flatten()[inverse]
+            if inv_dat is not None:
+                inverse, preinv = inv_dat
+                res = res.flatten()[preinv][inverse]
 
             wat = [x for y in res for x in y]
             new = sp.vstack(wat)
 
         shp = inds.shape if inds is not None else ()
-        res = SparseArray.from_data(new)
+        res = SparseArray.from_data(new, cache_block_data=False)
         res = res.reshape(shp[:-1] + res.shape[-1:])
 
         return res
@@ -602,6 +633,10 @@ class Operator:
         :return:
         :rtype:
         """
+        try:
+            idx = idx.obj # shared proxy deref
+        except AttributeError:
+            pass
         # worker threads only need to do a small portion of the work
         # and actually inherit most of their info from the parent process
         self._get_pop_parallel(None, idx, parallelizer, check_orthogonality=True)
@@ -622,6 +657,95 @@ class Operator:
         self._worker_get_elements(idx, parallelizer=parallelizer, check_orthogonality=check_orthogonality)
         return self._main_get_elements(inds, idx, parallelizer=parallelizer, check_orthogonality=check_orthogonality)
 
+    def _split_idx(self, idx):
+        if self.chunk_size is not None:
+            if isinstance(idx, BraKetSpace):
+                if len(idx) > self.chunk_size:
+                    idx_splits = idx.split(self.chunk_size)
+                else:
+                    idx_splits = [idx]
+            else:
+                idx_splits = [idx]
+        else:
+            idx_splits = [idx]
+        return idx_splits
+
+    # from memory_profiler import profile
+    # @profile
+    def _eval_chunks(self, inds, idx_splits,
+                     parallelizer=None,
+                     check_orthogonality=True,
+                     memory_constrained=False
+                     ):
+
+        # import tracemalloc
+        #
+        # tracemalloc.start()
+
+        chunks = []
+
+        if parallelizer is None:
+            parallelizer = self.parallelizer
+        if parallelizer is not None and not isinstance(parallelizer, SerialNonParallelizer):
+            with parallelizer:
+
+                for n, idx in enumerate(idx_splits):
+                    idx: BraKetSpace
+                    # parallelizer.printer = self.logger.log_print
+                    max_nproc = len(inds.flatten())
+                    # idx.load_space_diffs()
+                    idx = parallelizer.share(idx)
+                    elem_chunk = parallelizer.run(self._get_elements, None, idx,
+                                                  check_orthogonality=check_orthogonality,
+                                                  main_kwargs={'full_inds': inds},
+                                                  comm=None if max_nproc >= parallelizer.nprocs else list(range(max_nproc))
+                                                  )
+                    if memory_constrained:
+                        idx = idx.obj
+                        if len(idx_splits) > 1:
+                            idx.free()
+                        else:
+                            idx.clear_cache()
+                        idx_splits[n] = None
+                        del idx
+                        gc.collect()
+
+                    chunks.append(elem_chunk)
+        else:
+
+            for n, idx in enumerate(idx_splits):
+                idx: BraKetSpace
+                elem_chunk = self._main_get_elements(inds, idx,
+                                                     parallelizer=None,
+                                                     check_orthogonality=check_orthogonality
+                                                     )
+                if memory_constrained:
+                    # self.logger.log_print("mem usage post\n{m}", m="\n".join(str(x) for x in tracemalloc.take_snapshot().statistics('lineno')))
+                    if len(idx_splits) > 1:
+                        idx.free()
+                    else:
+                        idx.clear_cache()
+                    idx_splits[n] = None
+                    del idx
+                    gc.collect()
+
+                    # self.logger.log_print("mem usage freed\n{m}", m="\n".join(str(x) for x in tracemalloc.take_snapshot().statistics('lineno')))
+
+                chunks.append(elem_chunk)
+
+        return chunks
+
+    # @profile
+    def _construct_elem_array(self, chunks):
+
+        if all(isinstance(x, np.ndarray) for x in chunks):
+            elems = np.concatenate(chunks, axis=0)
+        else:
+            elems = chunks[0].concatenate(*chunks[1:])
+
+        return elems
+
+    # @profile
     def get_elements(self, idx,
                      parallelizer=None,
                      check_orthogonality=True,
@@ -637,50 +761,21 @@ class Operator:
         :rtype:
         """
 
-        if self.chunk_size is not None:
-            if isinstance(idx, BraKetSpace):
-                if len(idx) > self.chunk_size:
-                    idx_splits = idx.split(self.chunk_size)
-                else:
-                    idx_splits = [idx]
-            else:
-                idx_splits = [idx]
-        else:
-            idx_splits = [idx]
+        idx_splits = self._split_idx(idx)
 
-        chunks = []
-        for idx in idx_splits:
+        inds = self.get_inner_indices()
+        # print(">>>>>", inds.size)
+        if inds is None:
+            return self._get_elements(inds, idx, check_orthogonality=check_orthogonality)
 
-            inds = self.get_inner_indices()
-            if inds is None:
-                return self._get_elements(inds, idx, check_orthogonality=check_orthogonality)
+        chunks = self._eval_chunks(inds, idx_splits,
+                                   parallelizer=parallelizer,
+                                   check_orthogonality=check_orthogonality,
+                                   memory_constrained=memory_constrained
+                                   )
 
-            if parallelizer is None:
-                parallelizer = self.parallelizer
-
-            if parallelizer is not None and not isinstance(parallelizer, SerialNonParallelizer):
-                # parallelizer.printer = self.logger.log_print
-                max_nproc = len(inds.flatten())
-                elem_chunk = parallelizer.run(self._get_elements, None, idx,
-                                              check_orthogonality=check_orthogonality,
-                                              main_kwargs={'full_inds': inds},
-                                              comm=None if max_nproc >= parallelizer.nprocs else list(range(max_nproc))
-                                              )
-            else:
-                elem_chunk = self._main_get_elements(inds, idx, parallelizer=None,
-                                                     check_orthogonality=check_orthogonality
-                                                     )
-
-            idx.clear_cache()
-
-            chunks.append(elem_chunk)
-
-        if all(isinstance(x, np.ndarray) for x in chunks):
-            elems = np.concatenate(chunks, axis=0)
-        else:
-            elems = chunks[0].concatenate(*chunks[1:])
-
-        return elems
+        arr = self._construct_elem_array(chunks)
+        return arr
 
     @staticmethod
     def _get_dim_string(dims):
@@ -1016,14 +1111,14 @@ class ContractedOperator(Operator):
                          )
         self.chunk_size = chunk_size
 
-    def _get_element_block(self, idx, parallelizer=None, check_orthogonality=True):
+    def _get_element_block(self, idx, parallelizer=None, check_orthogonality=True, memory_constrained=False):
         c = self.coeffs
         if not isinstance(c, (int, np.integer, float, np.floating)):
             # takes an (e.g.) 5-dimensional SparseTensor and turns it into a contracted 2D one
             axes = self.axes
             if axes is None:
                 axes = (tuple(range(c.ndim)),) * 2
-            subTensor = super().get_elements(idx, parallelizer=parallelizer, check_orthogonality=check_orthogonality)
+            subTensor = super().get_elements(idx, parallelizer=parallelizer, check_orthogonality=check_orthogonality, memory_constrained=memory_constrained)
 
             # we collect here to minimize the effect of memory spikes if possible
             # self.clear_cache()
@@ -1036,12 +1131,13 @@ class ContractedOperator(Operator):
                     # TODO: make this broadcasting more robust
                     contracted = c[np.newaxis, :] * subTensor.squeeze()[:, np.newaxis]
             else:
-                if len(axes[1]) > 0:
-                    contracted = subTensor.tensordot(c, axes=axes).squeeze()
-                else:
-                    # TODO: make this broadcasting more robust
-                    subTensor = subTensor.expand_dims(-1)
-                    contracted = subTensor * c[np.newaxis, :]
+                with subTensor.cache_options(enabled=False):
+                    if len(axes[1]) > 0:
+                        contracted = subTensor.tensordot(c, axes=axes).squeeze()
+                    else:
+                        # TODO: make this broadcasting more robust
+                        subTensor = subTensor.expand_dims(-1)
+                        contracted = subTensor * c[np.newaxis, :]
 
             # if self.fdim > 3:
             #     raise RuntimeError("wwwwooooof")
@@ -1058,7 +1154,7 @@ class ContractedOperator(Operator):
 
         return contracted
 
-    def get_elements(self, idx, parallelizer=None, check_orthogonality=True):
+    def get_elements(self, idx, parallelizer=None, check_orthogonality=True, memory_constrained=False):
         """
         Computes the operator values over the specified indices
 
@@ -1071,18 +1167,9 @@ class ContractedOperator(Operator):
         if isinstance(c, (int, np.integer, float, np.floating)) and c == 0:
             return 0
 
-        if self.chunk_size is not None:
-            if isinstance(idx, BraKetSpace):
-                if len(idx) > self.chunk_size:
-                    idx_splits = idx.split(self.chunk_size)
-                else:
-                    idx_splits = [idx]
-            else:
-                idx_splits = [idx]
-        else:
-            idx_splits = [idx]
+        idx_splits = self._split_idx(idx)
 
-        chunks = [self._get_element_block(idx, check_orthogonality=check_orthogonality) for idx in idx_splits]
+        chunks = [self._get_element_block(idx, check_orthogonality=check_orthogonality, memory_constrained=memory_constrained) for idx in idx_splits]
         if all(isinstance(x, np.ndarray) for x in chunks):
             subchunks = [np.array([y]) if y.shape == () else y for y in chunks]
             contracted = np.concatenate(subchunks, axis=0)

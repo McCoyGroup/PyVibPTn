@@ -1,5 +1,5 @@
 
-from .VectorOps import vec_normalize
+from .VectorOps import vec_normalize, vec_angles
 import math, numpy as np
 
 __all__ = [
@@ -125,11 +125,25 @@ def rotation_matrix_ER_vec(axes, thetas):
         [2 * (bd + ac),    2 * (cd - ab),     aa + dd - bb - cc]
     ]).T
 
+def rotation_matrix_align_vectors(vec1, vec2):
+    angles, normals = vec_angles(vec1, vec2)
+    return rotation_matrix(normals, angles)
+
 def rotation_matrix(axis, theta):
+    """
+    :param axis:
+    :type axis:
+    :param theta: angle to rotate by (or Euler angles)
+    :type theta:
+    :return:
+    :rtype:
+    """
+
     try:
         flen = len(theta)
     except TypeError:
         flen = 0
+
     if type(axis) == str:
         if flen >0:
             mat_fun = rotation_matrix_basic_vec
@@ -137,7 +151,13 @@ def rotation_matrix(axis, theta):
             mat_fun = rotation_matrix_basic
     else:
         if flen > 0:
-            mat_fun = rotation_matrix_ER_vec
+            axis = np.asanyarray(axis)
+            theta = np.asanyarray(theta)
+
+            if axis.ndim == theta.ndim:
+                mat_fun = rotation_matrix_align_vectors
+            else:
+                mat_fun = rotation_matrix_ER_vec
         else:
             mat_fun = rotation_matrix_ER
 

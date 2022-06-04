@@ -122,6 +122,6 @@ class ModuleLoader:
 
     def load(self, file, pkg=None):
         if self.loader is not None:
-            return self.loader.load(file, pkg=pkg)
+            return self.loader.unshare(file, pkg=pkg)
         else:
             return importlib.import_module(file, package=pkg)

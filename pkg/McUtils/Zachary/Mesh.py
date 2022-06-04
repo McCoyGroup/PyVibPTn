@@ -143,7 +143,7 @@ class Mesh(np.ndarray):
         return np.reshape(g, (cls.get_npoints(g), g.shape[-1]))
 
     @classmethod
-    def get_mesh_subgrids(cls, grid, tol=8):
+    def get_mesh_subgrids(cls, grid, tol=None):
         """
         Returns the subgrids for a mesh
         :param grid:
@@ -156,9 +156,11 @@ class Mesh(np.ndarray):
 
         if isinstance(grid, Mesh):
             grid = grid.view(np.ndarray)
+        if tol is None:
+            tol = grid.dtype.itemsize
 
         if grid.ndim == 1:
-            _, idx = np.unique(grid, return_index=True)
+            _, idx = np.unique(np.round(grid, tol), return_index=True)
             return [grid[np.sort(idx),]]
         else:
             meshes = np.moveaxis(grid, len(grid.shape)-1, 0)
@@ -169,12 +171,14 @@ class Mesh(np.ndarray):
             return [_pull_u(np.round(m, tol)) for m in meshes]
 
     @classmethod
-    def get_mesh_spacings(cls, grid, tol=8):
+    def get_mesh_spacings(cls, grid, tol=None):
         subgrids = cls.get_mesh_subgrids(grid, tol=tol)
         if subgrids is None:
             return None
+        if tol is None:
+            tol = grid.dtype.itemsize // 2
 
-        mesh_spacings = [np.unique(np.diff(g)) for g in subgrids]
+        mesh_spacings = [np.unique(np.round(np.diff(g), tol)) for g in subgrids]
         if len(subgrids) == 1:
             mesh_spacings = mesh_spacings[0]
         return mesh_spacings
@@ -198,7 +202,7 @@ class Mesh(np.ndarray):
         ) # might introduce edge-case...? Hard to know
 
     @classmethod
-    def get_mesh_type(cls, grid, check_product_grid=True, check_regular_grid=True, tol=8):
+    def get_mesh_type(cls, grid, check_product_grid=True, check_regular_grid=True, tol=None):
         """
         Determines what kind of grid we're working with
 
@@ -243,7 +247,9 @@ class Mesh(np.ndarray):
                     product_grid = True
 
                 if product_grid and check_regular_grid:
-                    spacings = np.unique([np.diff(x) for x in subgrids])
+                    if tol is None:
+                        tol = grid.dtype.itemsize // 2
+                    spacings = np.unique([np.round(np.diff(x), tol) for x in subgrids])
                     regular_grid = all(len(x) == 1 for x in spacings)
                 else:
                     regular_grid = product_grid
@@ -260,6 +266,8 @@ class Mesh(np.ndarray):
                 return MeshType.Unstructured
         else:
             # means we _probably_ have a structured grid
+            if tol is None:
+                tol = grid.dtype.itemsize // 2
             subgrids = cls.get_mesh_subgrids(grid, tol=tol)
             # raise Exception(
             #     np.prod(grid.shape[:-1]), grid.shape,
@@ -274,7 +282,7 @@ class Mesh(np.ndarray):
                     product_grid = True
 
                 if product_grid and check_regular_grid:
-                    spacings = [np.unique(np.diff(x)) for x in subgrids]
+                    spacings = [np.unique(np.round(np.diff(x), tol)) for x in subgrids]
                     regular_grid = all(len(x) == 1 for x in spacings)
                 else:
                     regular_grid = product_grid
