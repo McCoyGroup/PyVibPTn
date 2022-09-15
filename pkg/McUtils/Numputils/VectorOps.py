@@ -25,7 +25,9 @@ __all__ = [
     "mat_vec_muls",
     "one_pad_vecs",
     "affine_multiply",
-    "cartesian_from_rad"
+    "cartesian_from_rad",
+    "polar_to_cartesian",
+    "apply_pointwise"
 ]
 
 ##
@@ -443,7 +445,6 @@ def vec_tensordot(tensa, tensb, axes=2, shared=None):
 
     at = a.transpose(newaxes_a).reshape(newshape_a)
     bt = b.transpose(newaxes_b).reshape(newshape_b)
-    # print(newaxes_a, newaxes_b, as_[:shared], at.shape, bt.shape)
     res = np.matmul(at, bt)
     final_shape = list(a_shape[:shared]) + olda + oldb
     # raise Exception(res.shape, final_shape)
@@ -570,16 +571,15 @@ def mat_vec_muls(mats, vecs):
     :rtype:
     """
 
-    vecs_2 = np.reshape(vecs, vecs.shape + (1,))
-    vecs_2 = np.matmul(mats, vecs_2)
+    vecs_2 = np.matmul(mats, vecs[..., np.newaxis])
     return np.reshape(vecs_2, vecs.shape)
 
 ################################################
 #
 #       one_pad_vecs
 def one_pad_vecs(vecs):
-    ones = np.ones((len(vecs), 1))
-    vecs = np.concatenate((vecs, ones), axis=1)
+    ones = np.ones(vecs.shape[:-1] + (1,))
+    vecs = np.concatenate([vecs, ones], axis=-1)
     return vecs
 
 ################################################
@@ -602,7 +602,7 @@ def affine_multiply(mats, vecs):
         vecs = one_pad_vecs(vecs)
     res = mat_vec_muls(mats, vecs)
     if vec_shape[-1] != 4:
-        res = res[:, :3]
+        res = res[..., :3]
     return res
 
 ###
@@ -703,3 +703,95 @@ def cartesian_from_rad(xa, xb, xc, r, a, d, psi=False, return_comps=False):
         else:
             comps = None
     return newstuff, comps
+
+##############################################################################
+#
+#       polar_to_cartesian
+#
+def polar_to_cartesian_transforms(centers, vecs1, vecs2, azimuths, polars):
+    """Builds a single set of affine transformation matrices to apply to the vecs1 to get a set of points
+
+    :param centers: central coordinates
+    :type centers: np.ndarray
+    :param vecs1: vectors coming off of the centers
+    :type vecs1: np.ndarray
+    :param vecs2: vectors coming off of the centers
+    :type vecs2: np.ndarray
+    :param angles: angle values
+    :type angles: np.ndarray
+    :param dihedrals: dihedral values
+    :type dihedrals: np.ndarray | None
+    :return:
+    :rtype:
+    """
+    from .TransformationMatrices import rotation_matrix, affine_matrix
+
+    rot_mats_1 = rotation_matrix(vecs2, -azimuths)
+    if polars is not None:
+        vecs1 = np.broadcast_to(vecs1, rot_mats_1.shape[:-1])
+        vecs2 = np.broadcast_to(vecs2, rot_mats_1.shape[:-1])
+        new_ax = mat_vec_muls(rot_mats_1, vecs1)
+        rot_mats_2 = rotation_matrix(vec_crosses(vecs2, new_ax), np.pi/2-polars)
+        rot_mat = np.matmul(rot_mats_2, rot_mats_1)
+    else:
+        rot_mat = rot_mats_1
+    transfs = affine_matrix(rot_mat, centers)
+    return transfs
+
+def polar_to_cartesian(center, v, u, r, a, d):
+    """
+    Constructs a Cartesian coordinate from a bond length, angle, and dihedral
+    and three points defining an embedding
+    :param xa: first coordinate defining the embedding
+    :type xa: np.ndarray
+    :param xb: third coordinate defining the embedding
+    :type xb: np.ndarray
+    :param xc: third coordinate defining the embedding
+    :type xc: np.ndarray
+    :param r:
+    :type r:
+    :param a:
+    :type a:
+    :param d:
+    :type d:
+    :param ref_axis:
+    :type ref_axis:
+    :param return_comps:
+    :type return_comps:
+    :return:
+    :rtype:
+    """
+
+    if a is None:
+        vecs1 = vec_normalize(v)
+        # no angle so all we have is a bond length to work with
+        # means we don't even really want to build an affine transformation
+        newstuff = center + r[..., np.newaxis] * vecs1
+    else:
+        vecs1 = vec_normalize(v)
+        vecs2 = vec_normalize(u)
+        transfs = polar_to_cartesian_transforms(center, vecs1, vecs2, a, d)
+        newstuff = affine_multiply(transfs, r[..., np.newaxis] * vecs1)
+    return newstuff
+
+##############################################################################
+#
+#       apply_pointwise
+#
+def apply_pointwise(tf, points, reroll=None, **kwargs):
+    roll = np.roll(np.arange(points.ndim), 1)
+    new_points = np.transpose(points, roll)
+    vals = tf(*new_points, **kwargs)
+    if not isinstance(vals, np.ndarray) and isinstance(vals[0], np.ndarray):
+        vals, rest = vals[0], vals[1:]
+        if len(rest) == 1:
+            rest = rest[0]
+    else:
+        rest = None
+    vals = np.asanyarray(vals)
+    if reroll or (reroll is None and vals.shape == new_points.shape):
+        vals = np.transpose(vals, np.roll(roll, -2))
+    if rest is not None:
+        return vals, rest
+    else:
+        return vals

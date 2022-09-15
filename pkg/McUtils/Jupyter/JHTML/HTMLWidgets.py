@@ -1046,6 +1046,7 @@ class HTMLWidgets:
     class Sup(WrappedHTMLElement): base=HTML.Sup
     class Svg(WrappedHTMLElement): base=HTML.Svg
     class Table(WrappedHTMLElement): base=HTML.Table
+    class TableHeader(WrappedHTMLElement): base=HTML.TableHeader
     class TableBody(WrappedHTMLElement): base=HTML.TableBody
     class TableHeading(WrappedHTMLElement): base=HTML.TableHeading
     class TableItem(WrappedHTMLElement): base=HTML.TableItem

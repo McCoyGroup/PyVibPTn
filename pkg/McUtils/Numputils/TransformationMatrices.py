@@ -143,6 +143,7 @@ def rotation_matrix(axis, theta):
         flen = len(theta)
     except TypeError:
         flen = 0
+    extra_shape = None
 
     if type(axis) == str:
         if flen >0:
@@ -155,13 +156,24 @@ def rotation_matrix(axis, theta):
             theta = np.asanyarray(theta)
 
             if axis.ndim == theta.ndim:
+                if theta.ndim > 2:
+                    extra_shape = theta.shape[:-2]
+                    axis = axis.reshape((-1, 3))
+                    theta = theta.reshape((-1, 3))
                 mat_fun = rotation_matrix_align_vectors
             else:
+                if theta.ndim > 1:
+                    extra_shape = theta.shape
+                    axis = axis.reshape((-1, 3))
+                    theta = theta.reshape(-1)
                 mat_fun = rotation_matrix_ER_vec
         else:
             mat_fun = rotation_matrix_ER
 
-    return mat_fun(axis, theta)
+    mats = mat_fun(axis, theta)
+    if extra_shape is not None:
+        mats = mats.reshape(extra_shape + (3, 3))
+    return mats
 
 #######################################################################################################################
 #
@@ -212,29 +224,25 @@ def affine_matrix(tmat, shift):
     :rtype:
     """
 
-    base_mat = np.asarray(tmat)
+    base_mat = np.asanyarray(tmat)
     if shift is None:
         return base_mat
 
-    if len(base_mat.shape) > 2:
-        shifts = np.asarray(shift)
-        if len(shifts.shape) == 1:
-            shifts = np.repeat(shifts, len(base_mat))
-        ones = np.ones((len(base_mat), 1))
-        shifts = np.concatenate((shifts, ones), axis=1)
-        zeros = np.zeros((len(base_mat), 1, 3))
-        mat = np.concatenate((base_mat, zeros), axis=1)
-        shifts = np.reshape(shifts, shifts.shape + (1,))
-        mat = np.concatenate((mat, shifts), axis=2)
-
-    else:
-        base_shift = np.append(np.array(shift), [1])
-        mat = np.column_stack(
-            (
-                np.row_stack(
-                    (base_mat, np.zeros((1, 3)))
-                ),
-                base_shift
-            )
+    if base_mat.ndim > 2:
+        shifts = np.asanyarray(shift)
+        if shifts.ndim == 1:
+            shifts = np.broadcast_to(shifts, (1,)*(base_mat.ndim-2) + shifts.shape)
+        shifts = np.broadcast_to(shifts, base_mat.shape[:-2] + (3,))
+        shifts = np.expand_dims(shifts, -1)
+        mat = np.concatenate([base_mat, shifts], axis=-1)
+        padding = np.array([0., 0., 0., 1.])
+        padding = np.broadcast_to(
+            np.broadcast_to(padding, (1,)*(base_mat.ndim-2) + padding.shape),
+            mat.shape[:-2] + (4,)
         )
+        padding = np.expand_dims(padding, -2)
+        mat = np.concatenate([mat, padding], axis=-2)
+    else:
+        mat = np.concatenate([base_mat, shift[:, np.newaxis]], axis=-1)
+        mat = np.concatenate([mat, [[0., 0., 0., 1.]]], axis=-2)
     return mat

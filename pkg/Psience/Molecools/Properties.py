@@ -424,7 +424,7 @@ class StructuralProperties:
 
         n = len(masses)
         # explicitly put masses in m_e from AMU
-        masses = UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass") * masses
+        # masses = UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass") * masses
         mT = np.sqrt(np.sum(masses))
         mvec = np.sqrt(masses)
 
@@ -694,7 +694,7 @@ class MolecularProperties:
         :return:
         :rtype:
         """
-        masses = mol.masses * UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
+        masses = mol._atomic_masses()
         return StructuralProperties.get_prop_g_matrix(masses, mol.coords, mol.internal_coordinates)
 
     @classmethod
@@ -708,7 +708,7 @@ class MolecularProperties:
         :rtype:
         """
 
-        return StructuralProperties.get_prop_center_of_mass(mol.coords, mol.masses)
+        return StructuralProperties.get_prop_center_of_mass(mol.coords, mol._atomic_masses())
 
     @classmethod
     def inertia_tensor(cls, mol):
@@ -721,7 +721,7 @@ class MolecularProperties:
         :rtype:
         """
 
-        return StructuralProperties.get_prop_inertia_tensors(mol.coords, mol.masses)
+        return StructuralProperties.get_prop_inertia_tensors(mol.coords, mol._atomic_masses())
 
     @classmethod
     def moments_of_inertia(cls, mol):
@@ -734,7 +734,7 @@ class MolecularProperties:
         :rtype:
         """
 
-        return StructuralProperties.get_prop_moments_of_inertia(mol.coords, mol.masses)
+        return StructuralProperties.get_prop_moments_of_inertia(mol.coords, mol._atomic_masses())
 
     @classmethod
     def principle_axis_data(cls, mol, sel=None):
@@ -747,7 +747,7 @@ class MolecularProperties:
         :rtype:
         """
         coords = mol.coords
-        masses = mol.masses
+        masses = mol._atomic_masses()
         if sel is not None:
             coords = coords[..., sel, :]
             masses = masses[sel]
@@ -763,7 +763,7 @@ class MolecularProperties:
         :return:
         :rtype:
         """
-        return StructuralProperties.get_prop_principle_axis_rotation(mol.coords, mol.masses, sel=sel, inverse=inverse)
+        return StructuralProperties.get_prop_principle_axis_rotation(mol.coords, mol._atomic_masses(), sel=sel, inverse=inverse)
 
     @classmethod
     def eckart_embedding_data(cls, mol, coords, sel=None, planar_ref_tolerance=None):
@@ -778,7 +778,7 @@ class MolecularProperties:
         :return:
         :rtype:
         """
-        masses = mol.masses
+        masses = mol._atomic_masses()
         ref = mol.coords
         coords = CoordinateSet(coords)
         return StructuralProperties.get_eckart_embedding_data(masses, ref, coords, sel=sel, planar_ref_tolerance=planar_ref_tolerance)
@@ -796,8 +796,8 @@ class MolecularProperties:
         :return:
         :rtype:
         """
-        m1 = ref_mol.masses
-        m2 = mol.masses
+        m1 = ref_mol._atomic_masses()
+        m2 = mol._atomic_masses()
         if not np.all(m1 == m2):
             raise ValueError("Eckart reference has different masses from scan ({}) vs. ({})".format(
                 m1,
@@ -818,7 +818,7 @@ class MolecularProperties:
         :return:
         :rtype:
         """
-        masses = mol.masses
+        masses = mol._atomic_masses()
         ref = mol.coords
         coords = CoordinateSet(coords)
         return StructuralProperties.get_eckart_embedded_coords(masses, ref, coords, sel=sel, planar_ref_tolerance=planar_ref_tolerance)
@@ -836,7 +836,7 @@ class MolecularProperties:
         """
         if sel is not None:
             raise NotImplementedError("Still need to add coordinate subselection")
-        return StructuralProperties.get_prop_translation_rotation_eigenvectors(mol.coords, mol.masses)
+        return StructuralProperties.get_prop_translation_rotation_eigenvectors(mol.coords, mol._atomic_masses())
 
     @classmethod
     def fragments(cls, mol):
@@ -1384,7 +1384,7 @@ class DipoleSurfaceManager(PropertyManager):
     def load_dipole_surface(self):
         raise NotImplementedError("haven't needed general dipole surfaces yet")
 
-    def _load_gaussian_fchk_dipoles(self, file):
+    def _load_gaussian_fchk_dipoles(self, file, masses=None, freqs=None):
         try:
             keys = ['DipoleMoment', 'DipoleDerivatives', 'DipoleHigherDerivatives', 'DipoleNumDerivatives']
             with GaussianFChkReader(file) as gr:
@@ -1413,6 +1413,19 @@ class DipoleSurfaceManager(PropertyManager):
         if thirds is not None:
             amu_conv = UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
             thirds = thirds / amu_conv
+
+        if num_grad is not None:
+            amu_conv = UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
+            # freqs = self.mol.normal_modes._freqs # badness for now
+            # sqrt_freqs = np.sign(freqs) * np.sqrt(np.abs(freqs))
+            conv = np.sqrt(amu_conv) #(sqrt_freqs * np.sqrt(amu_conv))
+            num_grad = num_grad / conv
+        if num_secs is not None:
+            amu_conv = UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
+            # freqs = self.mol.normal_modes._freqs  # badness for now
+            # sqrt_freqs = np.sign(freqs) * np.sqrt(np.abs(freqs))
+            conv = amu_conv # (sqrt_freqs * np.sqrt(amu_conv))
+            num_secs = num_secs * conv
 
         return {
             "analytic": (mom, grad, seconds, thirds),
@@ -1667,6 +1680,7 @@ class NormalModesManager(PropertyManager):
     def __init__(self, mol, normal_modes=None):
         super().__init__(mol)
         self._modes = normal_modes
+        self._freqs = None # implementation detail
 
     def set_molecule(self, mol):
         super().set_molecule(mol)
@@ -1781,6 +1795,7 @@ class NormalModesManager(PropertyManager):
             modes = modes.T
 
             modes = MolecularNormalModes(self.mol, modes, inverse=modes.T, freqs=freqs)
+            self._freqs = freqs # important for rephasing to work right...
 
             if rephase:
                 try:
@@ -1789,7 +1804,7 @@ class NormalModesManager(PropertyManager):
                     pass
                 else:
                     if phases is not None:
-                        modes = modes.rescale(phases)
+                        modes = modes.rotate(phases)
 
             if recalculate:
                 fcs = self.mol.potential_surface.force_constants
@@ -1870,19 +1885,44 @@ class NormalModesManager(PropertyManager):
         # raise Exception(d1_analytic.shape, d1_numerical.shape
 
         if modes is None:
-            modes = self.modes.basis
+            modes = self.modes.basis # in dimensionless coordinates
 
         mode_basis = modes.matrix
         rot_analytic = np.dot(d1_analytic.T, mode_basis)
+        # normalize
+        rot_analytic = rot_analytic / np.linalg.norm(rot_analytic, axis=0)[np.newaxis, :]
+        d1_numerical = d1_numerical / np.linalg.norm(d1_numerical, axis=1)[:, np.newaxis]
 
-        rot_analytic = np.nan_to_num(np.array([x/np.linalg.norm(x) for x in rot_analytic]), nan=0.0)
-        d1_numerical = np.nan_to_num(np.array([x/np.linalg.norm(x) for x in d1_numerical.T]), nan=0.0)
+        # we assume that these should be the same up to a rephasing
+        # so we the inner product matrix
+        h_mat = np.dot(d1_numerical, rot_analytic)
 
-        # could force some orientation relative to PAX frame?
-        # dot each into each other
-        phases = np.sign(np.diag(np.dot(d1_numerical.T, rot_analytic)))
+        # then we find the places where the magnitude of the diagonal
+        # is significantly less than 1
+        norms = np.diag(h_mat)
+        rot_pos = np.where(np.abs(norms) < .95)
+        if len(rot_pos) > 0:
+            rot_pos = rot_pos[0]
 
-        return phases
+        if len(rot_pos) == 1: # one mode is messed up but we just have to roll with it...
+            rot_pos = ()
+
+        rephasing_matrix = np.zeros_like(h_mat)
+        # any place where the diagonal is 1, we insert the rephasing directly
+        clean_pos = np.setdiff1d(np.arange(len(h_mat), dtype=int), rot_pos)
+        rephasing_matrix[clean_pos, clean_pos] = np.sign(norms[clean_pos])
+
+        if len(rot_pos) > 0:
+            # find the subrotations we need
+            subrotations = []
+            subrot = h_mat[np.ix_(rot_pos, rot_pos)]
+            while np.linalg.det(subrot) < .95:
+                raise NotImplementedError("only manage a single rotation for now...", np.linalg.det(subrot))
+            subrotations.append((rot_pos, subrot))
+            for rot_pos, subrot in subrotations:
+                rephasing_matrix[np.ix_(rot_pos, rot_pos)] = subrot
+
+        return rephasing_matrix.T
 
     def apply_transformation(self, transf):
         # self.modes # load in for some reason?

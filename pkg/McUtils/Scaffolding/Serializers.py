@@ -454,7 +454,7 @@ class NDarrayMarshaller:
             try:
                 x0 = data[0]
             except IndexError:
-                arr = np.asarray(data)
+                arr = np.asanyarray(data)
             else:
                 try_numpy = True
                 if isinstance(x0, np.ndarray):
@@ -477,9 +477,10 @@ class NDarrayMarshaller:
                         if not try_numpy: break
 
                 if try_numpy:
+                    #TODO: need to reset this later
                     np.warnings.filterwarnings('error', category=np.VisibleDeprecationWarning)
                     try:
-                        arr = np.array(data)
+                        arr = np.asanyarray(data)
                     except np.VisibleDeprecationWarning:
                         arr = np.empty(shape=(len(data),), dtype=object)
                         for i, v in enumerate(data):
@@ -494,6 +495,7 @@ class NDarrayMarshaller:
     def _iterable_to_numpy(self, data):
         # we do an initial pass to check if data is a numpy array
         # or if it needs to be/can conceivably be converted
+
 
         arr = self._prep_iterable(data)
 
@@ -771,7 +773,10 @@ class HDF5Serializer(BaseSerializer):
             # except TypeError:
             #     raise TypeError("can't coerce {}:{} to HDF5 format".format(key, data))
         else:
-            dt = ds.dtype
+            try:
+                dt = ds.dtype
+            except AttributeError:
+                dt = None
             if (
                     data is None
                     or dt != data.dtype and dt.names is not None

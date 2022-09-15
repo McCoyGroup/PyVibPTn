@@ -5,15 +5,15 @@ A little package of utilities for setting up/running VPT jobs
 import numpy as np, sys, os, itertools, scipy
 
 from McUtils.Data import UnitsData, AtomData
-from McUtils.Scaffolding import ParameterManager, Checkpointer
+from McUtils.Scaffolding import ParameterManager
 from McUtils.Zachary import FiniteDifferenceDerivative
+from McUtils.Extensions import ModuleLoader
 
-from ..BasisReps import BasisStateSpace, HarmonicOscillatorProductBasis
+from ..BasisReps import BasisStateSpace, HarmonicOscillatorProductBasis, BasisStateSpaceFilter
 from ..Molecools import Molecule
 
 from .DegeneracySpecs import DegeneracySpec
 from .Hamiltonian import PerturbationTheoryHamiltonian
-from .StateFilters import PerturbationTheoryStateSpaceFilter
 
 __all__ = [
     "VPTRunner",
@@ -25,12 +25,25 @@ __all__ = [
     "VPTSolverOptions"
 ]
 
-__reload_hook__ = ["..BasisRepss", "..Molecools", ".DegeneracySpecs", ".Hamiltonian", ".StateFilters"]
+__reload_hook__ = ["..BasisReps", "..Molecools", ".DegeneracySpecs", ".Hamiltonian", ".StateFilters"]
 
 class VPTSystem:
     """
     Provides a little helper for setting up the input
     system for a VPT job
+
+    :details:
+    When using functions of internal (Z-matrix/polyspherical) coordinates, a sample form of the conversion function is
+    ```python
+    def conv(r, t, f, **kwargs):
+        '''
+        Takes the bond lengths (`r`), angles `(t)` and dihedrals `(f)`,
+        and returns new coordinates that are functions of these coordinates
+        '''
+        ... # convert the coordinates
+        return np.array([r, t, f])
+    ```
+    and then the inverse function will take the output of `conv` and return the original Z-matrix/polyspherical coordinates.
     """
 
     __props__ = (
@@ -58,13 +71,19 @@ class VPTSystem:
                  ):
         """
         :param mol: the molecule or system specification to use (doesn't really even need to be a molecule)
-        :type mol: str | Molecule
-        :param internals: the Z-matrix for the internal coordinates (in the future will support a general function for this too)
-        :type internals:
+        :type mol: str | list | Molecule
+        :param internals: the Z-matrix for the internal coordinates optionally with a specification of a `conversion` and `inverse`
+        To supply a conversion function, provide a `dict` like so
+        ```python
+        {
+            'zmatrix': [[atom1, bond1, angle1, dihed1], [atom2, bond2, angle2, dihed2], ...] or None,
+            'conversion': 'a function to convert from Z-matrix coordinates to desired coordinates',
+            'inverse': 'the inverse conversion'
+        }
+        ```
+        :type internals: list | dict
         :param modes: the normal modes to use if not already supplied by the Molecule
-        :type modes:
-        :param mode_selection: the subset of normal modes to do perturbation theory on
-        :type mode_selection:
+        :type modes: MolecularVibrations|dict
         :param potential_derivatives: the derivatives of the potential to use for expansions
         :type potential_derivatives: Iterable[np.ndarray]
         :param dipole_derivatives: the set of dipole derivatives to use for expansions
@@ -86,19 +105,17 @@ class VPTSystem:
                         pos = mol.coords[ref_2] + 2 * c / np.linalg.norm(c)
                     dummy_specs.append([where, pos])
                 mol = mol.insert_atoms(["X"]*len(dummy_atoms), [d[1] for d in dummy_specs], [d[0] for d in dummy_specs])
-            mol.zmatrix = internals
+            mol.internals = internals
         self.mol = mol
         if modes is not None:
             self.mol.normal_modes.modes = modes
+        self.mode_selection = mode_selection
         if potential_derivatives is not None:
             self.mol.potential_derivatives = potential_derivatives
         elif potential_function is not None:
             self.get_potential_derivatives(potential_function, order=order)
         if dipole_derivatives is not None:
             self.mol.dipole_derivatives = dipole_derivatives
-
-        if mode_selection is not None:
-            self.mol.normal_modes.modes = self.mol.normal_modes.modes[mode_selection]
 
         if eckart_embed is True:
             self.mol = self.mol.get_embedded_molecule()
@@ -119,7 +136,10 @@ class VPTSystem:
         :return:
         :rtype:
         """
-        return len(self.mol.normal_modes.modes.freqs)
+        if self.mode_selection is not None:
+            return len(self.mode_selection)
+        else:
+            return len(self.mol.normal_modes.modes.freqs)
 
     def get_potential_derivatives(self, potential_function, order=2, **fd_opts):
         """
@@ -150,6 +170,84 @@ class VPTStateSpace:
     """
     Provides a helper to make it easier to set up the input
     state spaces/degenerate spaces to run the perturbation theory
+
+    :details:
+
+    There are multiple possible values for the `degeneracy_specs`.
+    The simplest is to use the automatic approach, in which we supply a numeric type (`int`, `float`, etc.) to use as the `WFC` threshold.
+    The next simplest is to explicitly supply the groups we want, like
+
+    ```python
+    [
+        [ # the first resonant space
+            state_1,
+            state_2,
+            state_3
+        ],
+        [ # the second
+            state_5, state_11, ...
+        ],
+        ...
+    ]
+    ```
+
+    We can also supply pairs of relations for determining resonances, like
+
+    ```python
+    [
+        [state_1,  state_2], # A first relation
+        [state_3,  state_4],  # another relation
+        ...
+    ]
+    ```
+
+    To allow for extra options, you can also supply a `dict`. If you wanted to have a different `wfc_threshold` and you wanted to do the secondary resonant space splitting step with a very large threshold, you could do that by supplying
+
+    ```python
+    {
+        'wfc_threshold':.1,
+        'energy_cutoff':1.0 # in Hartree
+    }
+    ```
+
+    or you can explicitly add extra groups to the pairs of polyad rules by saying
+
+    ```python
+    {
+        'polyads':[
+                [state_1,  state_2], # A first relation
+                [state_3,  state_4],  # another relation
+                ...
+            ],
+        'extra_groups': [
+            [ # the first resonant space
+                state_a,
+                state_b,
+                state_c
+            ],
+            [ # the second
+                state_d, state_e, ...
+            ],
+            ...
+        ]
+    }
+    ```
+
+    This also allows us to define more resonance handling strategies.
+
+    The Martin Test is supported,
+    ```python
+    {
+        'martin_threshold':.1/219465, #in Hartree
+    }
+    ```
+
+    As are total quanta vectors/polyads
+    ```python
+    {
+        'nT': [1, 1, 1, 0, 2, 2, 0] # e.g.
+    }
+    ```
     """
 
     __props__ = (
@@ -163,8 +261,8 @@ class VPTStateSpace:
         """
         :param states: A list of states or a number of quanta to target
         :type states: list | int
-        :param degeneracy_specs: A specification of degeneracies, either as polyads or explicit groups of states
-        :type degeneracy_specs: list | dict
+        :param degeneracy_specs: A specification of degeneracies, either as polyads, explicit groups of states, or parameters to a method. (see Details for more info)
+        :type degeneracy_specs: 'auto' | list | dict
         """
         if not isinstance(states, BasisStateSpace):
             states = BasisStateSpace(
@@ -295,11 +393,11 @@ class VPTStateSpace:
         # else:
         #     raise NotImplementedError("don't know what to do with degeneracy spec {}".format(degeneracy_specs))
 
-    def filter_generator(self, target_property, order=2):
+    def filter_generator(self, target_property, order=2, postfilters=None):
         def filter(states):
-            return self.get_state_space_filter(states, target=target_property, order=order)
+            return self.get_state_space_filter(states, target=target_property, order=order, postfilters=postfilters)
         return filter
-    def get_filter(self, target_property, order=2):
+    def get_filter(self, target_property, order=2, postfilters=None):
         """
         Obtains a state space filter for the given target property
         using the states we want to get corrections for
@@ -313,10 +411,11 @@ class VPTStateSpace:
         """
         return self.get_state_space_filter(self.state_list,
                                            target=target_property,
-                                           order=order
+                                           order=order,
+                                           postfilters=postfilters
                                            )
     @classmethod
-    def get_state_space_filter(cls, states, n_modes=None, order=2, target='wavefunctions'):
+    def get_state_space_filter(cls, states, n_modes=None, order=2, target='wavefunctions', postfilters=None):
         """
         Gets `state_space_filters` for the input `states` targeting some property
 
@@ -341,7 +440,7 @@ class VPTStateSpace:
         if target == 'wavefunctions':
             return None
         elif target == 'intensities':
-            return PerturbationTheoryStateSpaceFilter.from_property_rules(
+            return BasisStateSpaceFilter.from_property_rules(
                 cls.get_state_list_from_quanta(0, n_modes),
                 states,
                 [
@@ -350,21 +449,23 @@ class VPTStateSpace:
                 [
                     HarmonicOscillatorProductBasis(n_modes).selection_rules(*["x"]*i) for i in range(1, order+2)
                 ],
-                order=order
+                order=order,
+                postfilters=postfilters
             )
         elif target == 'frequencies':
             # return {
             #     (1, 1): ([],),
             #     (2, 0): (None, [[0]])
             # }
-            return PerturbationTheoryStateSpaceFilter.from_property_rules(
+            return BasisStateSpaceFilter.from_property_rules(
                 cls.get_state_list_from_quanta(0, n_modes),
                 states,
                 [
                     HarmonicOscillatorProductBasis(n_modes).selection_rules(*["x"] * i) for i in range(3, order + 3)
                 ],
                 None,
-                order=order
+                order=order,
+                postfilters=postfilters
                 # [
                 #     # (),
                 #     # (),
@@ -382,6 +483,9 @@ class VPTHamiltonianOptions:
     """
 
     __props__ = (
+        "mode_selection",
+        "include_potential",
+        "include_gmatrix",
          "include_coriolis_coupling",
          "include_pseudopotential",
          "potential_terms",
@@ -414,10 +518,15 @@ class VPTHamiltonianOptions:
          "grad_tolerance",
          "freq_tolerance",
          "g_derivative_threshold",
-         "gmatrix_tolerance"
+         "gmatrix_tolerance",
+         'use_cartesian_kinetic_energy',
+         'operator_coefficient_threshold'
     )
 
     def __init__(self,
+                 mode_selection=None,
+                 include_potential=None,
+                 include_gmatrix=None,
                  include_coriolis_coupling=None,
                  include_pseudopotential=None,
                  potential_terms=None,
@@ -450,16 +559,20 @@ class VPTHamiltonianOptions:
                  freq_tolerance=None,
                  g_derivative_threshold=None,
                  gmatrix_tolerance=None,
-                 use_internal_modes=None
+                 use_internal_modes=None,
+                 use_cartesian_kinetic_energy=None,
+                 operator_coefficient_threshold=None
                  ):
         """
+        :param mode_selection: the set of the supplied normal modes to do perturbation theory on
+        :type mode_selection: Iterable[int]|None
         :param include_coriolis_coupling: whether or not to include Coriolis coupling in Cartesian normal mode calculation
         :type include_coriolis_coupling: bool
         :param include_pseudopotential: whether or not to include the pseudopotential/Watson term
         :type include_pseudopotential: bool
-        :param potential_terms: explicit values for the potential terms (e.g. from analytic models)
+        :param potential_terms: explicit values for the potential terms (e.g. from analytic models), should be a list of tensors starting with the Hessian with each axis of length `nmodes`
         :type potential_terms: Iterable[np.ndarray]
-        :param kinetic_terms: explicit values for the kinetic terms (e.g. from analytic models)
+        :param kinetic_terms: explicit values for the kinetic terms (e.g. from analytic models), same format as for the potential
         :type kinetic_terms: Iterable[np.ndarray]
         :param coriolis_terms: explicit values for the Coriolis terms
         :type coriolis_terms: Iterable[np.ndarray]
@@ -479,8 +592,6 @@ class VPTHamiltonianOptions:
         :type mixed_derivative_handling_mode: bool
         :param backpropagate_internals: whether or not to do Cartesian coordinate calculations with values backpropagated from internals
         :type backpropagate_internals: bool
-        :param zero_mass_term: a placeholder value for dummy atom masses
-        :type zero_mass_term: float
         :param internal_fd_mesh_spacing: mesh spacing for finite difference of Cartesian coordinates with internals
         :type internal_fd_mesh_spacing: float
         :param internal_fd_stencil: stencil for finite difference of Cartesian coordinates with internals
@@ -503,8 +614,13 @@ class VPTHamiltonianOptions:
         :type freq_tolerance: float
         :param g_derivative_threshold: the size of the norm of any G-matrix derivative above which to print a warning
         :type g_derivative_threshold: float
+        :param operator_coefficient_threshold: the minimum size of a coefficient to keep when evaluating representation terms
+        :type operator_coefficient_threshold: float|None
         """
         all_opts = dict(
+            mode_selection=mode_selection,
+            include_potential=include_potential,
+            include_gmatrix=include_gmatrix,
             include_coriolis_coupling=include_coriolis_coupling,
             include_pseudopotential=include_pseudopotential,
             potential_terms=potential_terms,
@@ -537,7 +653,9 @@ class VPTHamiltonianOptions:
             grad_tolerance=grad_tolerance,
             freq_tolerance=freq_tolerance,
             g_derivative_threshold=g_derivative_threshold,
-            gmatrix_tolerance=gmatrix_tolerance
+            gmatrix_tolerance=gmatrix_tolerance,
+            use_cartesian_kinetic_energy=use_cartesian_kinetic_energy,
+            operator_coefficient_threshold=operator_coefficient_threshold
         )
 
         real_opts = {}
@@ -555,6 +673,7 @@ class VPTRuntimeOptions:
 
     __props__ = (
         "operator_chunk_size",
+        'matrix_element_threshold',
         "logger",
         "verbose",
         "checkpoint",
@@ -562,10 +681,13 @@ class VPTRuntimeOptions:
         "memory_constrained",
         "checkpoint_keys",
         "use_cached_representations",
-        "use_cached_basis"
+        "use_cached_basis",
+        "nondeg_hamiltonian_precision"
     )
     def __init__(self,
                  operator_chunk_size=None,
+                 matrix_element_threshold=None,
+                 nondeg_hamiltonian_precision=None,
                  logger=None,
                  verbose=None,
                  checkpoint=None,
@@ -577,30 +699,36 @@ class VPTRuntimeOptions:
                  use_cached_basis=None
                  ):
         """
-        :param operator_chunk_size: the number of representation matrix elements to calculate at once
-        :type operator_chunk_size: int
-        :param logger: the `Logger` object to use when logging the status of the calculation
-        :type logger: Logger
-        :param verbose: whether or not to be verbose in log output
-        :type verbose: bool
-        :param checkpoint: the checkpoint file or `Checkpointer` object to use
-        :type checkpoint: str
-        :param parallelizer: the `Parallelizer` object to use when parallelizing pieces of the calculation
-        :type parallelizer: Parallelizer
-        :param memory_constrained: whether or not to attempt memory optimizations
-        :type memory_constrained: bool
-        :param checkpoint_keys: the keys to write to the checkpoint file
-        :type checkpoint_keys: Iterable[str]
-        :param use_cached_representations: whether or not to try to load representation matrices from the checkpoint
+        :param operator_chunk_size: the number of representation matrix elements to calculate in at one time
+        :type operator_chunk_size: int|None default:None
+        :param matrix_element_threshold: the minimum size of matrix element to keep
+        :type matrix_element_threshold: float|None default:None
+        :param nondeg_hamiltonian_precision: the precision with which to print out elements in the degenerate coupling Hamiltonians in the log file
+        :type nondeg_hamiltonian_precision: int
+        :param logger: the `Logger` object to use when logging the status of the calculation (`True` means log normally)
+        :type logger: str|Logger|bool|None default:None
+        :param results: the `Checkpointer` to write corrections out to
+        :type results: str|Checkpointer|None default:None
+        :param parallelizer: the `Parallelizer` to use for parallelizing the evaluation of matrix elements
+        :type parallelizer: Parallelizer|None default:None
+        :param memory_constrained: whether or not to attempt memory optimizations (`None` means attempt for >20D problems)
+        :type memory_constrained: bool|None
+        :param checkpoint: the `Checkpointer` to write Hamiltonians and other bits out to
+        :type checkpoint: str|Checkpointer|None default:None
+        :param checkpoint_keys: which keys to save in the checkpoint
+        :type checkpoint_keys: Iterable[str]|None
+        :param use_cached_representations: whether other not to use Hamiltonian reps from the checkpoint
         :type use_cached_representations: bool
-        :param use_cached_basis: whether or not to try to load the bases to use from the checkpoint
+        :param use_cached_basis: whether other not to use bases from the checkpoint
         :type use_cached_basis: bool
         """
         ham_run_opts = dict(
             operator_chunk_size=operator_chunk_size,
             logger=logger,
             checkpoint=checkpoint,
-            parallelizer=parallelizer
+            results=results,
+            parallelizer=parallelizer,
+            matrix_element_threshold=matrix_element_threshold
         )
         real_ham_opts = {}
         for o, v in ham_run_opts.items():
@@ -613,9 +741,10 @@ class VPTRuntimeOptions:
             memory_constrained=memory_constrained,
             verbose=verbose,
             checkpoint_keys=checkpoint_keys,
-            results=results,
+            # results=results,
             use_cached_representations=use_cached_representations,
-            use_cached_basis=use_cached_basis
+            use_cached_basis=use_cached_basis,
+            nondeg_hamiltonian_precision=nondeg_hamiltonian_precision
         )
         real_solver_run_opts = {}
         for o, v in solver_run_opts.items():
@@ -627,6 +756,32 @@ class VPTSolverOptions:
     """
     Provides a helper to keep track of the options available
     for configuring the way the perturbation theory is applied
+
+    :details:
+    The `basis_postfilters` have multiple possible values.
+    Here are the currently supported cases
+
+    ```python
+    {
+        'max_quanta': [2, -1, 1, -1, ...] # the max number of quanta allowed in a given mode in the basis (-1 means infinity)
+    }
+    ```
+
+    - for excluding transitions
+
+    ```python
+    {
+        'excluded_transitions': [[0, 0, 1, 0, ...], [1, 0, 0, 0, ...], ...] # a set of transitions that are forbidden on the input states
+    }
+    ```
+
+    - for excluding based on a test
+
+    ```python
+    {
+        'test': func # a function that takes the basis and tests if states should be allowed
+    }
+    ```
     """
 
     __props__ = (
@@ -647,12 +802,13 @@ class VPTSolverOptions:
         "degenerate_states",
         "zero_order_energy_corrections",
         "handle_strong_couplings",
-        "strong_coupling_test_modes",
-        "strong_couplings_state_filter",
-        "strongly_coupled_group_filter",
-        "extend_strong_coupling_spaces",
-        "strong_coupling_zero_order_energy_cutoff",
-        "low_frequency_mode_cutoff"
+        # "strong_coupling_test_modes",
+        # "strong_couplings_state_filter",
+        # "strongly_coupled_group_filter",
+        # "extend_strong_coupling_spaces",
+        # "strong_coupling_zero_order_energy_cutoff",
+        "low_frequency_mode_cutoff",
+        "check_overlap"
     )
     def __init__(self,
                  order=2,
@@ -677,13 +833,22 @@ class VPTSolverOptions:
                  extend_strong_coupling_spaces=None,
                  strong_coupling_zero_order_energy_cutoff=None,
                  low_frequency_mode_cutoff=None,
-                 zero_order_energy_corrections=None
+                 zero_order_energy_corrections=None,
+                 check_overlap=None
                  ):
         """
         :param order: the order of perturbation theory to apply
         :type order: int
-        :param expansion_order: the order to go to in the expansions of the perturbations
-        :type expansion_order: int
+        :type order: int
+        :param expansion_order: the order to go to in the expansions of the perturbations, this can be supplied for different properties independently, like
+        ```python
+        expansion_order = {
+            'potential':some_int,
+            'kinetic':some_int,
+            'dipole':some_int
+        }
+        ```
+        :type expansion_order: int | dict
         :param degenerate_states: the set of degeneracies to handle
         :type degenerate_states: Iterable[BasisStateSpace]
         :param coupled_states: explicit bases of states to use at each order in the perturbation theory
@@ -710,8 +875,17 @@ class VPTSolverOptions:
         :type intermediate_normalization: bool
         :param zero_element_warning: whether or not to warn if an element of the representations evaluated to zero (i.e. we wasted effort)
         :type zero_element_warning: bool
+        :param low_frequency_mode_cutoff: the energy below which to consider a mode to be "low frequency"
+        :type low_frequency_mode_cutoff: float (default:500 cm-1)
         :param zero_order_energy_corrections: energies to use for the zero-order states instead of the diagonal of `H(0)`
         :type zero_order_energy_corrections: dict
+        :param check_overlap: whether or not to ensure states are normalized in the VPT
+        :type check_overlap: bool default:True
+        """
+        """
+        
+        
+        
         """
         all_opts = dict(
             order=order,
@@ -736,7 +910,8 @@ class VPTSolverOptions:
             ignore_odd_order_energies=ignore_odd_order_energies,
             intermediate_normalization=intermediate_normalization,
             zero_element_warning=zero_element_warning,
-            zero_order_energy_corrections=zero_order_energy_corrections
+            zero_order_energy_corrections=zero_order_energy_corrections,
+            check_overlap=check_overlap
         )
 
         real_opts = {}
@@ -745,6 +920,20 @@ class VPTSolverOptions:
                 real_opts[o] = v
 
         self.opts = real_opts
+
+    @staticmethod
+    def _harmonic_energies(corrected_fundamental_freqs, states):
+        """
+
+        :param corrected_fundamental_freqs:
+        :type corrected_fundamental_freqs:
+        :param states:
+        :type states:
+        :return:
+        :rtype:
+        """
+        corrected_fundamental_freqs = np.asanyarray(corrected_fundamental_freqs)
+        return np.dot(np.array(states) + 1 / 2, corrected_fundamental_freqs)
 
     @staticmethod
     def get_zero_order_energies(corrected_fundamental_freqs, states):
@@ -758,7 +947,6 @@ class VPTSolverOptions:
         :rtype:
         """
         corrected_fundamental_freqs = np.asanyarray(corrected_fundamental_freqs)
-
         return [
             (s, np.dot(np.array(s) + 1 / 2, corrected_fundamental_freqs))
             for s in states
@@ -936,6 +1124,7 @@ class VPTRunner:
                system,
                states,
                target_property=None,
+               basis_filters=None,
                corrected_fundamental_frequencies=None,
                **opts
                ):
@@ -972,25 +1161,27 @@ class VPTRunner:
             )
 
         order = 2 if 'order' not in opts.keys() else opts['order']
-        if target_property is None and order == 2:
+        if target_property is None:
             target_property = 'intensities'
         if target_property is not None and 'state_space_filters' not in opts:
             if 'expansion_order' in opts.keys():
                 expansion_order = opts['expansion_order']
             else:
                 expansion_order = order
-            par.ops['state_space_filters'] = states.filter_generator(target_property, order=order)
-
-            # print(par.ops['state_space_filters'])
+            par.ops['state_space_filters'] = states.filter_generator(target_property, order=order, postfilters=basis_filters)
 
         if corrected_fundamental_frequencies is not None and (
                 'zero_order_energy_corrections' not in opts
                 or opts['zero_order_energy_corrections'] is None
         ):
-            par.ops['zero_order_energy_corrections'] = VPTSolverOptions.get_zero_order_energies(
+            par.ops['zero_order_energy_corrections'] = lambda states: VPTSolverOptions._harmonic_energies(
                 corrected_fundamental_frequencies,
-                states.state_list
+                states
             )
+            # par.ops['zero_order_energy_corrections'] = VPTSolverOptions.get_zero_order_energies(
+            #     corrected_fundamental_frequencies,
+            #     states.state_list
+            # )
 
         hops = VPTHamiltonianOptions(**par.filter(VPTHamiltonianOptions))
         rops = VPTRuntimeOptions(**par.filter(VPTRuntimeOptions))
@@ -1013,6 +1204,24 @@ class VPTRunner:
                    calculate_intensities=True,
                    **opts
                    ):
+        """
+        The standard runner for VPT.
+        Makes a runner using the `construct` method and then calls that
+        runner's `print_tables` method after printing out run info.
+
+        :param system: the system spec, either as a `Molecule`, molecule spec (atoms, coords, opts) or a file to construct a `Molecule`
+        :type system: list|str|Molecule
+        :param states: the states to get corrections for either an `int` (up to that many quanta) or an explicit state list
+        :type states: int|list
+        :param target_property: the target property to get corrections for (one of 'frequencies', 'intensities', 'wavefunctions')
+        :type target_property: str
+        :param corrected_fundamental_frequencies: a set of fundamental frequencies to use to get new zero-order energies
+        :type corrected_fundamental_frequencies: Iterable[float]|None
+        :param calculate_intensities: whether or not to calculate energies
+        :type calculate_intensities: bool default:True
+        :param opts: options that work for a `VPTSystem`, `VPTStateSpace`, `VPTRuntimeOptions`, `VPTSolverOptions`, or `VPTHamiltonianOptions` object which will be filtered automatically
+        :type opts:
+        """
 
         runner, (system, states, hops, rops, sops) = cls.construct(
             system,
@@ -1258,6 +1467,29 @@ class AnneInputHelpers:
         return [AtomData[x]["Symbol"] for x in coords]
 
     @classmethod
+    def parse_masses(cls, block):
+        coords = []
+        if os.path.isfile(block):
+            with open(block) as f:
+                for line in f:
+                    line = line.strip()
+                    if len(line) > 0:
+                        try:
+                            coords.extend([float(x) for x in line.split()])
+                        except ValueError:
+                            pass
+        else:
+            cls._check_file(block)
+            for line in block.splitlines():
+                line = line.strip()
+                if len(line) > 0:
+                    try:
+                        coords.extend([float(x) for x in line.split()])
+                    except ValueError:
+                        pass
+        return coords
+
+    @classmethod
     def parse_zmatrix(cls, block):
         _ = 10000
         zmat = [[0, _, _, _]]
@@ -1332,12 +1564,12 @@ class AnneInputHelpers:
     @classmethod
     def renormalize_modes(cls, freqs, modes, inv, sorting=None, type=2):
         if type == 0:
-            modes = modes[sorting, :]
-            inv = inv[:, sorting]
+            if sorting is not None:
+                om = inv
+                modes = modes[sorting, :]
+                inv = inv[:, sorting]
             modes, inv = inv.T, modes.T
             freq = freqs
-            # modes = modes / freqs[np.newaxis, :]
-            # inv = inv * freqs[:, np.newaxis]
         else:
             F, G = cls.get_internal_FG(freqs, modes, inv, sorting=sorting)
             if type==1:
@@ -1373,8 +1605,6 @@ class AnneInputHelpers:
     @classmethod
     def reexpress_normal_modes(cls, base_modes, old_field, dipole, sorting=None, type=2):
         freq, matrix, inv = cls.renormalize_modes(*base_modes, sorting=sorting, type=type)
-        # print(freq, matrix, inv)
-        # freq, matrix, inv = cls.renormalize_modes(*base_modes, sorting=sorting)
         potential_terms = cls.rerotate_force_field(
             base_modes[1],
             matrix.T,
@@ -1410,19 +1640,97 @@ class AnneInputHelpers:
     def mass(atom):
         return AtomData[atom]["Mass"] * UnitsData.convert("AtomicMassUnits", "AtomicUnitOfMass")
 
+    @classmethod
+    def extract_term_lists(cls, checkpoint, terms, skip_dimensions=0, threshold=0, aggregator=None):
+        from McUtils.Scaffolding import Checkpointer
+
+        data = Checkpointer.from_file(checkpoint)
+        terms = data[terms]
+        if aggregator is not None:
+            terms = aggregator(terms)
+
+        term_files = []
+        for t in terms:
+            term_list = []
+            ndim = t.ndim - skip_dimensions
+            use_t = threshold<=0
+            for idx in np.ndindex(*t.shape):
+                if (use_t or np.abs(t[idx]) > threshold) and all(idx[i] <= idx[i+1] for i in range(skip_dimensions, ndim-1)):
+                    term_list.append(tuple(i+1 for i in idx) + (t[idx],))
+            term_files.append(term_list)
+        return term_files
 
     @classmethod
-    def run_anne_job(cls, base_dir,
+    def write_term_lists(cls, terms, file_template=None, int_fmt="{:>3.0f}", float_fmt="{:>16.8e}", index_function=None):
+        import io
+
+        res = []
+        if index_function is None:
+            index_function = lambda i:i
+        for i, t in enumerate(terms):
+            if file_template is None:
+                file = io.StringIO()
+            else:
+                file = file_template.format(index_function(i))
+            with file if file_template is None else open(file, 'w+') as out:
+                out.writelines(
+                    " ".join((int_fmt if isinstance(x, int) else float_fmt).format(x) for x in row)+"\n"
+                    for row in t
+                )
+            res.append(file)
+        return res
+
+    @classmethod
+    def extract_terms(cls, chk, out, terms, default_output='output.hdf5', aggregator=None, index_function=None, skip_dimensions=0):
+        if os.path.isdir(chk):
+            woof = os.getcwd()
+            try:
+                os.chdir(chk)
+                return cls.write_term_lists(
+                    cls.extract_term_lists(default_output, terms, aggregator=aggregator, skip_dimensions=skip_dimensions),
+                    file_template=out,
+                    index_function=index_function
+                )
+            finally:
+                os.chdir(woof)
+        else:
+            return cls.write_term_lists(
+                cls.extract_term_lists(chk, terms, aggregator=aggregator, skip_dimensions=skip_dimensions),
+                file_template=out,
+                index_function=index_function
+            )
+    @classmethod
+    def extract_potential(cls, chk, out='potential_expansion_{}.dat'):
+        return cls.extract_terms(chk, out, 'potential_terms', index_function=lambda i:i+2)
+    @classmethod
+    def extract_gmatrix(cls, chk, out='gmatrix_expansion_{}.dat'):
+        return cls.extract_terms(chk, out, 'gmatrix_terms')
+    @classmethod
+    def extract_dipole_expansion(cls, chk, out='dipole_expansion_{}.dat'):
+        def agg(terms):
+            return [
+                np.array([terms[a][i] for a in ['x', 'y', 'z']])
+                for i in range(len(terms['x']))
+            ]
+        return cls.extract_terms(chk, out, 'dipole_terms', aggregator=agg, skip_dimensions=1)
+
+    @classmethod
+    def run_anne_job(cls,
+                     base_dir,
                      states=2,
                      calculate_intensities=None,
                      return_analyzer=False,
                      return_runner=False,
                      modes_file='nm_int.dat',
                      atoms_file='atom.dat',
+                     masses_file='mass.dat',
                      coords_file='cart_ref.dat',
                      zmat_file='z_mat.dat',
                      potential_files=('cub.dat', 'quart.dat', 'quintic.dat', 'sextic.dat'),
                      dipole_files=('lin_dip.dat', 'quad_dip.dat', "cub_dip.dat", "quart_dip.dat", 'quintic_dip.dat'),
+                     coordinate_transformation=None,
+                     coordinate_transformation_file='coordinate_transformation.py',
+                     results_file=None,#'output.hdf5',
                      order=None,
                      expansion_order=None,
                      energy_units=None,
@@ -1432,6 +1740,8 @@ class AnneInputHelpers:
         from .Analyzer import VPTAnalyzer
 
         og_dir = os.getcwd()
+        if base_dir is not None and base_dir == ".":
+            base_dir = None
         try:
             if base_dir is not None:
                 os.chdir(base_dir)
@@ -1454,13 +1764,45 @@ class AnneInputHelpers:
             else:
                 conv = cls.convert(energy_units, "Hartrees")
             potential = [t * conv for t in potential]
-            atoms = cls.parse_atoms(atoms_file)
+            if os.path.exists(masses_file):
+                masses = cls.parse_masses(masses_file)
+            else:
+                masses = None
+            if masses is not None:
+                masses = np.asanyarray(masses)
+            #     if np.min(np.abs(masses)) < 100:
+            #         masses = cls.convert('AtomicMassUnits', 'AtomicUnitOfMass')*masses
+            if masses is None or os.path.isfile(atoms_file):
+                atoms = cls.parse_atoms(atoms_file)
+            else:
+                atoms = ['H']*len(masses)
             coords = cls.parse_coords(coords_file)
             if zmat_file is None:
                 zmat = None
             else:
-                zmat = cls.parse_zmatrix(zmat_file)
+                if os.path.isfile(zmat_file):
+                    zmat = cls.parse_zmatrix(zmat_file)
+                else:
+                    zmat = None
             sorting = cls.standard_sorting(zmat)  # we need to re-sort our internal coordinates
+            if coordinate_transformation is None:
+                if os.path.isfile(coordinate_transformation_file):
+                    tf_mod = ModuleLoader().load(coordinate_transformation_file)
+                    if not hasattr(tf_mod, 'conversion') or not hasattr(tf_mod, 'inverse'):
+                        raise ValueError("Coordinate transformation module {} needs both '{}' and '{}' methods".format(
+                            coordinate_transformation_file,
+                            'conversion',
+                            'inverse'
+                        ))
+                    coordinate_transformation = [tf_mod.conversion, tf_mod.inverse]
+            if coordinate_transformation is not None:
+                if callable(coordinate_transformation) or len(coordinate_transformation) != 2:
+                    raise ValueError("need both a coordinate transformation and inverse passed like `[tf, inv]`")
+                zmat = {
+                    'zmatrix':zmat,
+                    'conversion':coordinate_transformation[0],
+                    'inverse':coordinate_transformation[1]
+                }
             if os.path.exists(dipole_files[0]):
                 dipole_terms = [cls.parse_dipole_tensor(f) for f in dipole_files if os.path.isfile(f)]
                 # if energy_units is None:
@@ -1508,7 +1850,7 @@ class AnneInputHelpers:
                 if 'kinetic' not in expansion_order:
                     expansion_order['kinetic'] = 2
                 if dipole_terms is not None and 'dipole' not in expansion_order:
-                    expansion_order['dipole'] = len(dipole_terms) - 1
+                    expansion_order['dipole'] = len(dipole_terms[0]) - 2
             if order is None:
                 if isinstance(expansion_order, int):
                     if expansion_order > 2:
@@ -1517,10 +1859,9 @@ class AnneInputHelpers:
                         order = 2
                 else:
                     order = expansion_order['potential']
-            # raise Exception([a.shape for a in dipole_terms])
 
             res = runner(
-                [atoms, coords],
+                [atoms, coords, dict(masses=masses)],
                 states,
                 modes={
                     "freqs": freq,
@@ -1532,6 +1873,7 @@ class AnneInputHelpers:
                 internals=zmat,
                 order=order,
                 expansion_order=expansion_order,
+                results=results_file,
                 **opts
             )
             if return_analyzer:
@@ -1544,6 +1886,61 @@ class AnneInputHelpers:
             os.chdir(og_dir)
 
         return res
+    @classmethod
+    def run_fchk_job(cls,
+                     base_dir,
+                     states=2,
+                     calculate_intensities=None,
+                     return_analyzer=False,
+                     return_runner=False,
+                     # modes_file='nm_int.dat',
+                     # atoms_file='atom.dat',
+                     # masses_file='mass.dat',
+                     # coords_file='cart_ref.dat',
+                     zmat_file='z_mat.dat',
+                     # potential_files=('cub.dat', 'quart.dat', 'quintic.dat', 'sextic.dat'),
+                     # dipole_files=('lin_dip.dat', 'quad_dip.dat', "cub_dip.dat", "quart_dip.dat", 'quintic_dip.dat'),
+                     fchk_file='fchk.fchk',
+                     results_file='output.hdf5',
+                     **opts
+                     ):
+        from .Analyzer import VPTAnalyzer
+
+        curdir = os.getcwd()
+        try:
+            os.chdir(base_dir)
+
+            if return_analyzer:
+                runner = lambda *a, **kw:VPTAnalyzer.run_VPT(*a, calculate_intensities=calculate_intensities, **kw)
+            elif return_runner:
+                runner = VPTRunner.construct
+            else:
+                runner = lambda *a, **kw:VPTRunner.run_simple(*a, calculate_intensities=calculate_intensities, **kw)
+            # raise Exception([a.shape for a in dipole_terms])
+
+            if zmat_file is None:
+                zmat = None
+            else:
+                if os.path.isfile(zmat_file):
+                    zmat = cls.parse_zmatrix(zmat_file)
+                else:
+                    zmat = None
+
+            res = runner(
+                fchk_file,
+                states,
+                internals=zmat,
+                results=results_file,
+                **opts
+            )
+            if return_analyzer:
+                res.print_output_tables(
+                    print_intensities=calculate_intensities,
+                    print_energies=not calculate_intensities
+                )
+
+        finally:
+            os.chdir(curdir)
 
     @classmethod
     def get_internal_expansion(cls, fchk, internals, states=2, **opts):

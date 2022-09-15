@@ -54,7 +54,7 @@ class TensorExpansionTerms:
                 new_term.name = 'dQ({})'.format(self.name)
             return new_term
         @abc.abstractmethod
-        def asarray(self)->np.ndarray:
+        def asarray(self, **kwargs)->np.ndarray:
             raise NotImplementedError("base class")
         @property
         def array(self):
@@ -113,6 +113,10 @@ class TensorExpansionTerms:
             return TensorExpansionTerms.ScalingTerm(self, other)
         def __rmul__(self, other):
             return TensorExpansionTerms.ScalingTerm(self, other)
+        def __pos__(self):
+            return self
+        def __neg__(self):
+            return -1*self
         def flip(self):
             raise NotImplementedError("base class")
         def divided(self):
@@ -157,8 +161,8 @@ class TensorExpansionTerms:
             self.terms=terms
         def deriv(self):
             return type(self)(*(s.dQ() for s in self.terms))
-        def asarray(self):
-            all_terms = [(i, s.array) for i,s in enumerate(self.terms)]
+        def asarray(self, print_terms=False):
+            all_terms = [(i, s.asarray(print_terms=print_terms)) for i,s in enumerate(self.terms)]
             clean_terms = [s for s in all_terms if not (isinstance(s[1], (int, float, np.integer, np.floating)) and s[1]==0)]
             for s in clean_terms:
                 if s[1].shape != clean_terms[0][1].shape:
@@ -214,12 +218,12 @@ class TensorExpansionTerms:
             else:
                 scale_dim = 0
             return scale_dim + self.term.ndim
-        def asarray(self):
+        def asarray(self, print_terms=False):
             scaling = self.scaling
             if isinstance(self.scaling, TensorExpansionTerms.TensorExpansionTerm):
-                scaling = scaling.array
+                scaling = scaling.asarray(print_terms=print_terms)
             if isinstance(scaling, np.ndarray):
-                term = self.term.array
+                term = self.term.asarray(print_terms=print_terms)
                 if scaling.ndim > 0 and term.ndim > 0:
                     og_term_dim = term.ndim
                     for i in range(scaling.ndim):
@@ -227,7 +231,7 @@ class TensorExpansionTerms:
                     for i in range(og_term_dim):
                         scaling = np.expand_dims(scaling, 0)
             else:
-                term = self.term.array
+                term = self.term.asarray(print_terms=print_terms)
             return scaling*term
         def to_string(self):
             meh_1 = '({})'.format(self.scaling) if isinstance(self.scaling, TensorExpansionTerms.SumTerm) else self.scaling
@@ -246,7 +250,7 @@ class TensorExpansionTerms:
         def deriv(self):
             term = type(self)(self.term.dQ(), self.scaling)
             if isinstance(self.scaling, TensorExpansionTerms.TensorExpansionTerm):
-                ugh2 = type(self)(self.scaling.dQ(), self.term)
+                ugh2 = type(self)(self.term, self.scaling.dQ())
                 term += ugh2
             return term
     class PowerTerm(TensorExpansionTerm):
@@ -257,10 +261,12 @@ class TensorExpansionTerms:
             super().__init__(array=array)
             self.term = term
             self.pow=pow
+            if self.term.ndim > 0:
+                raise ValueError("can't do this pops")
         def rank(self):
             return self.term.rank()
-        def asarray(self):
-            wat = self.term.array
+        def asarray(self, print_terms=False):
+            wat = self.term.asarray(print_terms=print_terms)
             out = wat**self.pow
             return out
         def to_string(self):
@@ -287,8 +293,8 @@ class TensorExpansionTerms:
             super().__init__(term, -1, array=array)
         def to_string(self):
             return '1/{}'.format(self.term)
-        def asarray(self):
-            out = 1 / self.term.array
+        def asarray(self, print_terms=False):
+            out = 1 / self.term.asarray(print_terms=print_terms)
             return out
         def reduce_terms(self, check_arrays=False):
             if isinstance(self.term, TensorExpansionTerms.FlippedTerm):
@@ -305,8 +311,8 @@ class TensorExpansionTerms:
             self.b=end
         def deriv(self):
             return type(self)(self.term.dQ(), self.a+1, self.b+1)
-        def asarray(self):
-            t = self.term.array
+        def asarray(self, print_terms=False):
+            t = self.term.asarray(print_terms=print_terms)
             if isinstance(t, (int, float, np.integer, np.floating)) and t == 0:
                 return 0
             else:
@@ -393,9 +399,9 @@ class TensorExpansionTerms:
             self.i=i
             self.j=j
             self.right=right
-        def asarray(self):
-            t1 = self.left.array
-            t2 = self.right.array
+        def asarray(self, print_terms=False):
+            t1 = self.left.asarray(print_terms=print_terms)
+            t2 = self.right.asarray(print_terms=print_terms)
             if isinstance(t1, (int, float, np.integer, np.floating)) and t1 == 0:
                 return 0
             elif isinstance(t2, (int, float, np.integer, np.floating)) and t2 == 0:
@@ -518,7 +524,7 @@ class TensorExpansionTerms:
             self.n = n
         def deriv(self):
             return type(self)(self.terms, self.n+1)
-        def asarray(self):
+        def asarray(self, print_terms=False):
             if self.n == 0:
                 return self.terms.base_qx
             else:
@@ -543,13 +549,14 @@ class TensorExpansionTerms:
                     mixed_terms is not None
                     and self.m > 0
                     and len(mixed_terms) > 0
+                    # and mixed_terms[0] is not None
                     and len(mixed_terms[0]) >= self.m
                     and mixed_terms[0][self.m-1] is not None
             ):
                 return self.terms.QXV(1, self.m)
             else:
                 return self.terms.ContractionTerm(self.terms.QX(1), 2, 1, self.terms.XV(self.m+1))
-        def asarray(self):
+        def asarray(self, print_terms=False):
             if self.m == 0:
                 return self.terms.base_qx
             else:
@@ -571,7 +578,7 @@ class TensorExpansionTerms:
             self.m = m
         def deriv(self):
             return type(self)(self.terms, self.n+1, self.m)
-        def asarray(self):
+        def asarray(self, print_terms=False):
             return self.terms.qxv_terms[self.n-1][self.m-1]
         def rank(self):
             if isinstance(self.array, (int, float, np.integer, np.floating)) and self.array == 0:
@@ -616,8 +623,12 @@ class TensorExpansionTerms:
                     )
                 )
             )
-        def asarray(self):
-            return np.tensordot(self.terms.qx_terms[self.n-1], self.terms.xv_terms[self.m-1], axes=[self.i, self.j])
+        def asarray(self, print_terms=False):
+            arr = np.tensordot(self.terms.qx_terms[self.n-1], self.terms.xv_terms[self.m-1], axes=[self.i, self.j])
+            if print_terms:
+                print(self)
+                print(arr)
+            return arr
         def rank(self):
             return self.terms.qx_terms[self.n-1].ndim + self.terms.xv_terms[self.m-1].ndim - 2
         def to_string(self):
@@ -632,16 +643,20 @@ class TensorExpansionTerms:
             self.term = term
         def rank(self):
             return self.term.rank()
-        def asarray(self):
-            return np.linalg.inv(self.term.array)
+        def asarray(self, print_terms=False):
+            arr = np.linalg.inv(self.term.asarray(print_terms=print_terms))
+            if print_terms:
+                print(self)
+                print(arr)
+            return arr
         def to_string(self):
             return '({}^-1)'.format(self.term)
         def reduce_terms(self, check_arrays=False):
             return type(self)(self.term.simplify(check_arrays=check_arrays), array=self._arr)
         def deriv(self):
             dq = self.term.dQ()
-            sub = dq.dot(self, 2, self.ndim)  # self.dot(self.term.dQ(), self.ndim, 2)
-            return -sub.dot(self, sub.ndim-1, 1)  # .shift(self.ndim, 1)
+            sub = self.dot(dq, self.ndim, 2).shift(self.ndim, 1)  # self.dot(self.term.dQ(), self.ndim, 2)
+            return -sub.dot(self, sub.ndim, 1)  # .shift(self.ndim, 1)
     class TraceTerm(TensorExpansionTerm):
         def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', axis1=1, axis2=2, array=None):
             super().__init__(array=array)
@@ -650,8 +665,12 @@ class TensorExpansionTerms:
             self.axis2 = axis2
         def rank(self):
             return self.term.ndim - 2
-        def asarray(self):
-            return np.trace(self.term.array, axis1=self.axis1-1, axis2=self.axis2-1)
+        def asarray(self, print_terms=False):
+            arr = np.trace(self.term.asarray(print_terms=print_terms), axis1=self.axis1-1, axis2=self.axis2-1)
+            if print_terms:
+                print(self)
+                print(arr)
+            return arr
         def to_string(self):
             return 'Tr[{},{}+{}]'.format(self.term, self.axis1, self.axis2)
         def reduce_terms(self, check_arrays=False):
@@ -662,14 +681,17 @@ class TensorExpansionTerms:
                     array=self._arr
                 )
                 if check_arrays: self._check_simp(new)
-            elif isinstance(simp, TensorExpansionTerms.AxisShiftTerm):
-                new = TensorExpansionTerms.AxisShiftTerm(
-                    type(self)(simp.term, axis1=self.axis1, axis2=self.axis2),
-                    simp.a,
-                    simp.b,
-                    array=self._arr
-                )
-                if check_arrays: self._check_simp(new)
+            # elif isinstance(simp, TensorExpansionTerms.AxisShiftTerm):
+            #     # wait this is completely wrong...?
+            #
+            #     sub = type(self)(simp.term, axis1=self.axis1, axis2=self.axis2)
+            #     new = TensorExpansionTerms.AxisShiftTerm(
+            #         type(self)(simp.term, axis1=self.axis1, axis2=self.axis2),
+            #         simp.a,
+            #         simp.b,
+            #         array=self._arr
+            #     )
+            #     if check_arrays: self._check_simp(new)
             else:
                 new = type(self)(simp, axis1=self.axis1, axis2=self.axis2, array=self._arr)
             return new
@@ -682,8 +704,8 @@ class TensorExpansionTerms:
             self.term = term
         def rank(self):
             return 0
-        def asarray(self):
-            return np.linalg.det(self.term.array)
+        def asarray(self, print_terms=False):
+            return np.linalg.det(self.term.asarray(print_terms=print_terms))
         def to_string(self):
             return '|{}|'.format(self.term)
         def reduce_terms(self, check_arrays=False):
@@ -694,13 +716,16 @@ class TensorExpansionTerms:
                     self.term.ndim,
                     2
                 )
+            if self.term.ndim > 1:
+                inv_dot = inv_dot.shift(self.term.ndim, 1)
+            # print(inv_dot)
             tr = TensorExpansionTerms.TraceTerm(
                 inv_dot,
-                axis1=1,
+                axis1=2,
                 axis2=inv_dot.ndim
             )*self
-            if self.ndim > 1:
-                tr = tr.shift(self.ndim, 1)
+            # if self.term.ndim > 2:
+            #     tr = tr.shift(self.term.ndim-1, 1)
             return tr
 
 class TensorDerivativeConverter:

@@ -318,6 +318,7 @@ class AbstractStateSpace(metaclass=abc.ABCMeta):
                                    freqs=None,
                                    freq_threshold=None
                                    ):
+        #TODO: find a way to ignore some subset of transformations
         """
         Returns bra and ket indices that can be used as indices to generate representations
 
@@ -510,8 +511,18 @@ class BasisStateSpace(AbstractStateSpace):
         if len(self._init_states) > 0:
             if self.infer_state_inds_type() == self.StateSpaceSpec.Indices:
                 self._indices = self._init_states.astype(int)
+                if self._indices.ndim != 1:
+                    raise ValueError("excitations shape {} is incompatible with {}".format(
+                        self._indices.shape,
+                        type(self).__name__
+                    ))
             else:
                 self._excitations = self._init_states.astype(self.excitations_dtype)
+                if self._excitations.ndim != 2:
+                    raise ValueError("excitations shape {} is incompatible with {}".format(
+                        self._excitations.shape,
+                        type(self).__name__
+                    ))
             if not self.keep_excitations:
                 self.indices # caching
                 self._excitations = None
@@ -688,8 +699,6 @@ class BasisStateSpace(AbstractStateSpace):
                                                                 return_inverse=True
                                                                 )
             self._uinds = np.sort(uinds)
-            # if len(states) > 1000:
-            #     raise Exception('why')
             raw_inds = self.basis.ravel_state_inds(np.reshape(states, (-1, self.ndim)))
             return raw_inds[inv]
         elif states_type is self.StateSpaceSpec.Indices:
@@ -1837,6 +1846,13 @@ class BasisMultiStateSpace(AbstractStateSpace):
         """
         return self.spaces[item]
 
+    def map(self, f):
+        def _map_slice(sl):
+            arr = np.empty(len(sl), dtype=object)
+            arr[:] = [f(x) for x in sl]
+            return arr
+        return type(self)(np.apply_along_axis(_map_slice, -1, self.spaces))
+
     def to_state(self, serializer=None):
         return {
             'basis':self.basis,
@@ -1893,7 +1909,9 @@ class BasisMultiStateSpace(AbstractStateSpace):
         return self.spaces.flat
 
     def get_mode(self):
-        if all(s.has_indices for s in self.spaces.flat):
+        if len(self) == 0:
+            return self.StateSpaceSpec.Indices
+        elif all(s.has_indices for s in self.spaces.flat):
             return self.StateSpaceSpec.Indices
         elif all(s.has_excitations for s in self.spaces.flat):
             return self.StateSpaceSpec.Excitations
@@ -1978,7 +1996,6 @@ class BasisMultiStateSpace(AbstractStateSpace):
         """
         if self.representative_space.full_basis is not None:
             track_excitations = False
-
 
         if track_excitations and self.mode == self.StateSpaceSpec.Excitations:
             states = BasisStateSpace(
@@ -2866,6 +2883,28 @@ class SelectionRuleStateSpace(BasisMultiStateSpace):
                 return cls(space, new, selection_rules), filter
 
     @classmethod
+    def _filter_transitions(cls, space:BasisStateSpace, excitations:"Iterable[BasisStateSpace]", excluded_transitions):
+        excluded_transitions = np.asanyarray(excluded_transitions)
+        if len(excluded_transitions) == 0:
+            return excitations
+        new = np.empty(len(space), dtype=object)
+        #TODO: do fewer comps in the future to make this faster
+        for i,(s,e) in enumerate(zip(space.excitations, excitations)):
+            diffs = e.excitations - s[np.newaxis, :]
+            matches = np.any(np.all(diffs[:, np.newaxis, :] == excluded_transitions[np.newaxis, :, :], axis=2), axis=1)
+            # now we drop the match states
+            e = e.take_subspace(np.where(np.logical_not(matches))[0])
+            new[i] = e
+        return new
+    def filter_transitions(self, excluded_transitions, in_place=False):
+        if not in_place:
+            import copy
+            new = copy.copy(self)
+            return new.filter_transitions(excluded_transitions, in_place=True)
+        self.spaces = self._filter_transitions(self.representative_space, self.spaces, excluded_transitions)
+        return self
+
+    @classmethod
     def _find_space_intersections(cls, space, filter_space, perms, selection_rules):
         """
         :param space: set of initial states to generate connections off of
@@ -3201,6 +3240,17 @@ class SelectionRuleStateSpace(BasisMultiStateSpace):
         self._excitations = None
         self._indexer = None
         self._uinds = None
+
+    def map(self, f):
+        def _map_slice(sl):
+            arr = np.empty(len(sl), dtype=object)
+            arr[:] = [f(x) for x in sl]
+            return arr
+        # new_spaces = np.apply_along_axis(_map_slice, -1, self.spaces)
+        return type(self)(
+            self.representative_space,
+            np.apply_along_axis(_map_slice, -1, self.spaces)
+        )
 
     def __repr__(self):
         return "{}(ogstates={}, nstates={}, basis={})".format(

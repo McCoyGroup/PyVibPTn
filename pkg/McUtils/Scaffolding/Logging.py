@@ -145,8 +145,8 @@ class Logger:
     _loggers = weakref.WeakValueDictionary()
     default_verbosity = LogLevel.Normal
     def __init__(self,
-                 log_file = None,
-                 log_level = None,
+                 log_file=None,
+                 log_level=None,
                  print_function=None,
                  padding="",
                  newline="\n"
@@ -255,6 +255,14 @@ class Logger:
     @staticmethod
     def split_lines(obj):
         return str(obj).splitlines()
+    @staticmethod
+    def prep_array(obj):
+        import numpy as np
+        with np.printoptions(linewidth=1e8):
+            return str(obj).splitlines()
+    @staticmethod
+    def prep_dict(obj):
+        return ["{k}: {v}".format(k=k, v=v) for k,v in obj.items()]
 
     def log_print(self,
                   message,
@@ -327,21 +335,32 @@ class Logger:
                 print_options['flush'] = self.auto_flush
 
             if log_level <= self.verbosity:
-                log = self.log_file
-                msg = self.format_message(message, meta=self.format_metainfo(metainfo), preformatter=preformatter , **kwargs)
-                if isinstance(log, str):
-                    if not os.path.isdir(os.path.dirname(log)):
-                        try:
-                            os.makedirs(os.path.dirname(log))
-                        except OSError:
-                            pass
-                    #O_NONBLOCK is *nix only
-                    with open(log, mode="a", buffering=1 if print_options['flush'] else -1) as lf: # this is potentially quite slow but I am also quite lazy
-                        print_function(msg, file=lf, **print_options)
-                elif log is None:
-                    print_function(msg, **print_options)
+
+                msg = self.format_message(message,
+                                          meta=self.format_metainfo(metainfo),
+                                          preformatter=preformatter,
+                                          **kwargs)
+                if isinstance(print_function, str) and print_function == 'echo':
+                    if self.log_file is not None:
+                        self._print_message(print, msg, self.log_file, print_options)
+                    self._print_message(print, msg, None, print_options)
                 else:
-                    print_function(msg, file=log, **print_options)
+                    self._print_message(print_function, msg, self.log_file, print_options)
+    @staticmethod
+    def _print_message(print_function, msg, log, print_options):
+        if isinstance(log, str):
+            if not os.path.isdir(os.path.dirname(log)):
+                try:
+                    os.makedirs(os.path.dirname(log))
+                except OSError:
+                    pass
+            # O_NONBLOCK is *nix only
+            with open(log, mode="a", buffering=1 if print_options['flush'] else -1) as lf:  # this is potentially quite slow but I am also quite lazy
+                print_function(msg, file=lf, **print_options)
+        elif log is None:
+            print_function(msg, **print_options)
+        else:
+            print_function(msg, file=log, **print_options)
 
     def __repr__(self):
         return "{}({}, {})".format(

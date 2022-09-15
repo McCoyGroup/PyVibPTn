@@ -8,8 +8,11 @@ __all__ = [
     'unflatten_dtype',
     'recast_permutation',
     'recast_indices',
-    'downcast_index_array'
+    'downcast_index_array',
+    'numeric_types'
 ]
+
+numeric_types = (int, float, np.integer, np.floating)
 
 def downcast_index_array(a, max_val):
     return a.astype(infer_inds_dtype(max_val))

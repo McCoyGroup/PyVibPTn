@@ -17,8 +17,13 @@ class FunctionExpansionException(Exception):
     pass
 class FunctionExpansion:
     """
-    A class for handling expansions of an internal coordinate potential up to 4th order
-    Uses Cartesian derivative matrices and the Cartesian <-> Internal normal mode Jacobian
+    A class for handling expansions of an arbitrary function
+    given a set of derivatives and also allows for coordinate
+    transformations if the appropriate derivatives are supplied.
+
+    Can be used to handle multiple expansions simultaneously, but requires
+    that all expansions are provided up to the same order.
+
     """
 
     def __init__(self,
@@ -29,7 +34,6 @@ class FunctionExpansion:
                  weight_coefficients=True
                  ):
         """
-
         :param derivatives: Derivatives of the function being expanded
         :type derivatives: Iterable[np.ndarray | Tensor]
         :param transforms: Jacobian and higher order derivatives in the coordinates
@@ -44,8 +48,8 @@ class FunctionExpansion:
 
         # raise NotImplementedError("doesn't deal with higher-order expansions properly yet")
         self._derivs = self.FunctionDerivatives(derivatives, weight_coefficients)
-        self._center = center
-        self.ref = ref
+        self._center = np.asanyarray(center) if center is not None else center
+        self.ref = np.asanyarray(center) if not isinstance(ref, (int, float, np.integer, np.floating)) else ref
         if transforms is None:
             self._transf = None
         else:
@@ -53,6 +57,9 @@ class FunctionExpansion:
             self._transf = self.CoordinateTransforms(transforms)
         self._tensors = None
 
+    @property
+    def is_multiexpansion(self):
+        return self._derivs[0].ndim > 1
     @classmethod
     def expand_function(cls,
                         f, point,
@@ -97,7 +104,7 @@ class FunctionExpansion:
         Provides the tensors that will contracted
 
         :return:
-        :rtype:
+        :rtype: Iterable[np.ndarray]
         """
         if self._tensors is None:
             if self._transf is None:
@@ -115,31 +122,44 @@ class FunctionExpansion:
         :rtype:
         """
 
-        if self._center is None:
+        coords = np.asanyarray(coords)
+        cshape = coords.shape # so we can squeeze at the end if need be
+        if coords.ndim == 1:
+            coords = coords[np.newaxis]
+        elif coords.ndim > 2:
+            coords = np.reshape(coords, (-1, cshape[-1]))
+
+        center = self._center
+        if center is None:
             # we assume we have a vector of points
             disp = coords
-            coord_axis = 1
         else:
-            if coords.shape == self._center.shape:
+            if center.ndim == 1:
+                center = center[np.newaxis]
+            else:
+                center = center[:, np.newaxis, :]
                 coords = coords[np.newaxis]
-            disp = coords - self._center
-            coord_axis = coords.ndim - self._center.ndim
+            disp = coords - center
+
+
         expansions = []
-        for i, t in enumerate(self.expansion_tensors):
+        for i, tensr in enumerate(self.expansion_tensors):
             # contract the tensor by the displacements until it's completely reduced
-            tensr = t #type: np.ndarray
+            tensr = np.broadcast_to(tensr[np.newaxis], (disp.shape[0],) + tensr.shape)
             for j in range(i+1):
-                try:
-                    if j == 0:
-                        tensr = np.tensordot(disp, tensr, axes=[[coord_axis], [tensr.ndim-1]])
-                    else:
-                        tensr = vec_tensordot(disp, tensr, axes=[[coord_axis], [tensr.ndim-1]])
-                except:
-                    raise Exception(disp.shape, tensr.shape, coord_axis, tensr.ndim)
+                # try:
+                tensr = vec_tensordot(disp, tensr, axes=[[-1], [tensr.ndim-1]])
+                # except:
+                #     raise ValueError(disp.shape, tensr.shape, -1, tensr.ndim)
             contraction = tensr
             if squeeze:
                 contraction = contraction.squeeze()
             expansions.append(contraction)
+
+        if len(cshape) == 1:
+            expansions = np.squeeze(expansions)
+        elif len(cshape) > 2:
+            expansions = np.reshape(expansions, cshape[:-1])
 
         return expansions
     def expand(self, coords, squeeze = True):
@@ -151,7 +171,7 @@ class FunctionExpansion:
         :rtype: float | np.ndarray
         """
         ref = self.ref
-        exps = self.get_expansions(coords, squeeze = squeeze)
+        exps = self.get_expansions(coords, squeeze=squeeze)
         return ref + sum(exps)
 
     def __call__(self, coords, **kw):

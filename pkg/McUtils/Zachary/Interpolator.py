@@ -1,16 +1,19 @@
 """
 Sets up a general Interpolator class that looks like Mathematica's InterpolatingFunction class
 """
+import typing
 
 import numpy as np, abc, enum
 import scipy.interpolate as interpolate
 import scipy.spatial as spat
 from .Mesh import Mesh, MeshType
+from ..Numputils import vec_outer
 
 __all__ = [
     "Interpolator",
     "Extrapolator",
-    "ProductGridInterpolator"
+    "ProductGridInterpolator",
+    "UnstructuredGridInterpolator"
 ]
 
 
@@ -246,6 +249,124 @@ class UnstructuredGridInterpolator(BasicInterpolator):
         :rtype: UnstructuredGridInterpolator
         """
         raise NotImplementedError("derivatives not implemented for unstructured grids")
+
+class RBFInterpolator:
+    """
+    Provides a flexible RBF interpolator that also allows
+    for matching function derivatives
+    """
+
+
+
+    def __init__(self,
+                 pts, values, *derivatives,
+                 kernel:typing.Union[callable,dict],
+                 auxiliary_basis=None,
+                 extra_degree=-1
+                 ):
+
+        pts = np.asanyarray(pts)
+        if pts.ndim == 1:
+            pts = pts[:, np.newaxis]
+        self.grid, self.grid_shifts, self.grid_scaling = self.renormalize_grid(pts)
+        self.tree = spat.KDTree(self.grid)
+        self.vals, self.val_shift, self.val_scaling = values
+        self.derivs = derivatives
+        if not isinstance(kernel, dict):
+            kernel = {'function':kernel}
+        if 'derivatives' not in kernel:
+            kernel['derivatives'] = None
+        self.kernel = kernel
+        if not isinstance(auxiliary_basis, dict):
+            auxiliary_basis = {'function':auxiliary_basis}
+        if 'derivatives' not in auxiliary_basis:
+            auxiliary_basis['derivatives'] = None
+        self.aux_poly = auxiliary_basis
+        self.extra_degree = extra_degree
+
+    def renormalize_grid(self, pts):
+        dim_slices = np.transpose(pts)
+        mins = [np.min(x) for x in dim_slices]
+        maxs = [np.max(x) for x in dim_slices]
+        scalings = [M-m for M,m in zip(mins, maxs)]
+        rescaled_slices = [(x-m)/s for x,m,s in zip(dim_slices, mins, scalings)]
+        return np.transpose(rescaled_slices), mins, scalings
+    def renormalize_values(self, values):
+        min = np.min(values)
+        scaling = np.max(values) - min
+        return (values-min)/scaling, min, scaling
+    def renomalize_derivs(self, derivs):
+        #TODO: rescale, handle coordinate transforms, and take upper triangles
+        ...
+
+    # @staticmethod
+    # def _poly_eval
+    @staticmethod
+    def _eval_poly(pts, order, var=None, var_deriv=None, deriv_order=0):
+        #  use direct product expansion of terms & corresponding derivs!
+        #       decreasese requested nominal order and allows for better fits
+        #       and potentially more stable extrapolation?
+        ndim = pts.shape[-1]
+
+        # if var is not None:
+        #     pts = var(pts)
+
+        # TODO: add in custom vars with derivs
+        res = [[] for _ in range(deriv_order+1)]
+        for d in range(deriv_order+1):
+            x = pts
+            I = np.broadcast_to(np.eye(ndim)[np.newaxis], (pts.shape[0], ndim, ndim))
+            if d == 0: # add in initial terms
+                res[d].append(x)
+            elif d == 1:
+                res[d].append(I)
+            else:
+                res[d].append(0)
+            for i in range(d-1):  # add in zero tensors
+                res[d].append(0)
+            for i in range(d, order-1): # everything below is handled or zeros
+                # evaluate basic monomial terms
+                x = np.expand_dims(x, 1)  # npts x 1 ... [i times]  x ndim
+                A = np.expand_dims(res[d][-1], -1) # npts x ndim x ... [(d+1)*i times] x 1
+                X_i = A * pts
+                if d > 0:
+                    # we have the expr d_k X^N = d_k X^(N-1) * x + k d_(k-1) X^(N-1) * I
+                    I = np.expand_dims(I, 1) # npts x 1 x ... x ndim x ndim
+                    B = res[d-1][i-1] # npts x ndim x ...[d * i-1 times] x 1 x 1
+                    X_i += d * np.expand_dims(B, -1)
+                res[d].append(X_i)
+        return res
+    @staticmethod
+    def _eval_r_derivs(pts, order):
+        ...
+    @classmethod
+    def _poly(cls, order):
+        def p(pts):
+            return cls._eval_poly(pts, order, ...)
+        return p
+    def evaluate_poly_matrix(self, pts, degree, poly_origin=0.5, include_constant_term=True):
+        #TODO: include deriv order and merge all at once
+        fn = self.aux_poly['function']
+        pts = pts - poly_origin
+        blocks = ([np.ones((len(pts), 1))] if include_constant_term else []) + [
+            fn(o)(pts)
+            for o in range(1, degree+1)
+        ]
+        return np.concatenate(blocks, axis=1)
+    def evaluate_rbf_matrix(self, pts, centers, deriv_order=0):
+        displacements_matrix = pts[:, np.newaxis, :] - centers[np.newaxis, :, :]
+        distance_mat = np.linalg.norm(displacements_matrix, axis=1)
+        rbf_vals = self.kernel(distance_mat)
+        res = [rbf_vals]
+        # TODO: now ~~include derivs~~
+        der_fun = self.kernel['derivatives']
+        # There _must_ be a removable singularity at zero and no singularities anywhere else
+        rbf_dvals = [d(distance_mat) for d in self.kernel['derivatives']]
+
+
+
+
+
 
 class ExtrapolatorType(enum.Enum):
     Default='Automatic'

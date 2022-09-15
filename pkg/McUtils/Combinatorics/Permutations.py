@@ -715,7 +715,8 @@ class UniquePermutations:
         :rtype:
         """
 
-        return self.get_permutation_indices(self.vals, self.counts, perms,
+        return self.get_permutation_indices(perms,
+                                            classes=self.vals, counts=self.counts,
                                             assume_sorted=assume_sorted, preserve_ordering=preserve_ordering,
                                             dim=self.dim, num_permutations=self.num_permutations)
 
@@ -1272,12 +1273,18 @@ class UniquePermutations:
         This can be very powerful for building algorithms that need to consider every permutation of
         an object.
 
-        :param perms:
-        :type perms:
-        :param assume_sorted:
-        :type assume_sorted:
-        :return:
-        :rtype:
+        :param counts:
+        :type counts:
+        :param on_visit:
+        :type on_visit:
+        :param indices:
+        :type indices:
+        :param dim:
+        :type dim:
+        :param num_permutations:
+        :type num_permutations:
+        :param include_positions:
+        :type include_positions:
         """
 
         # We walk the counts tree.
@@ -2018,6 +2025,12 @@ class SymmetricGroupGenerator:
         else:
             indices = np.asanyarray(indices)
 
+        # shortcut for 1D
+        if self.dim == 1:
+            if not smol:
+                indices = np.expand_dims(indices, -1)
+            return indices
+
         big_shp = indices.shape
         if indices.ndim > 1:
             indices = np.reshape(indices, -1)
@@ -2263,12 +2276,16 @@ class SymmetricGroupGenerator:
 
                 # filter_from_ind_spec(i, j, block_idx, block_sizes, perm_pos, full_inds_sorted, inv)
 
-    def _build_direct_sums(self, input_perm_classes, counts, classes,
+    def _build_direct_sums(self,
+                           input_perm_classes,
+                           counts,
+                           classes,
                            return_indices=False,
                            return_excitations=True,
                            filter_negatives=True,
                            allow_widen_dtypes=True,
                            filter=None, inds_dtype=None,
+                           excluded_permutations=None,
                            full_basis=None
                            ):
         """
@@ -2403,20 +2420,25 @@ class SymmetricGroupGenerator:
         def add_new_perms(idx, perm, cls_pos, cts, depth, tree_data,
                           classes=classes,
                           input_perm_classes=input_perm_classes,
-                          class_negatives=class_negatives
+                          class_negatives=class_negatives,
+                          excluded_permutations=excluded_permutations
                           ):
             """
+            Adds each new permutation to the existing states
+             and then to the final storage
 
-            :param idx:
+            :param idx: which permutation this one is
             :type idx:
-            :param perm:
+            :param perm: the permutation we are applying (as a list)
             :type perm:
-            :param counts:
-            :type counts:
-            :param depth:
-            :type depth:
-            :param tree_data:
-            :type tree_data:
+            :param cls_pos:
+            :type cls_pos:
+            :param classes: see above
+            :type classes:
+            :param input_perm_classes: see above
+            :type input_perm_classes:
+            :param class_negatives: the combinations within each class that can be negative?
+            :type class_negatives:
             :return:
             :rtype:
             """
@@ -2443,6 +2465,19 @@ class SymmetricGroupGenerator:
                 # do this for all of the possible perms of `counts` (i.e. if we do this in full)
                 # This gives us strict ordering relations that we can make use of and allows us to only calculate
                 # the counts once
+                # if excluded_permutations is not None and idx in excluded_permutations:
+                #     # if we want to exclude some permutation
+                #     # we first assume that we determined which class
+                #     # this corresponded to as well as which permutation
+                #     # index within that class
+                #     exclude = excluded_permutations[idx]
+                #     if exclude is not None:
+                #         keep = np.setdiff1d(np.arange(len(added)), exclude)
+                #         added = added[keep,]
+                #         # we need to update the mask appropriately...
+                #     print(perms)
+                # else:
+                #     keep = np.arange(len(added))
                 new_rep_perm = rep[np.newaxis, :] + class_perms[cls_inds[i], :]
                 if filter_negatives and mask is not None:
                     class_negs = tuple(np.array(class_neg_list[j], dtype=class_negatives[0].dtype) for j in cls_inds[i])
@@ -2614,13 +2649,15 @@ class SymmetricGroupGenerator:
 
         return sum_sorting, perm_sorting, usums, perm_classes, perm_subsortings
 
-    def take_permutation_rule_direct_sum(self, perms, rules,
+    def take_permutation_rule_direct_sum(self,
+                                         perms, rules,
                                          sums=None,
                                          assume_sorted=False,
                                          return_indices=False,
                                          return_excitations=True,
                                          full_basis=None,
                                          split_results=False,
+                                         excluded_permutations=None,
                                          filter_perms=None,
                                          return_filter=False,
                                          preserve_ordering=True,
@@ -2711,6 +2748,69 @@ class SymmetricGroupGenerator:
         # next split up the input permutations
         sum_sorting, perm_sorting, usums, perm_classes, perm_subsortings = self.get_equivalence_classes(perms, sums=sums, assume_sorted=assume_sorted)
 
+        if excluded_permutations is not None:
+            raise NotImplementedError("too tricky to pre-exclude permutations")
+            # make sure shapes work out
+            dim = self.dim
+            excluded_permutations = np.asanyarray(excluded_permutations)
+            if isinstance(excluded_permutations.dtype, np.unsignedinteger):
+                excluded_permutations = excluded_permutations.astype(_infer_nearest_pos_neg_dtype(excluded_permutations.dtype))
+            if excluded_permutations.dtype.names is not None:
+                excluded_permutations = unflatten_dtype(excluded_permutations, (len(excluded_permutations), self.dim), perms.dtype[0])
+
+            # og_perms = perms # for debug
+            # next we pad up the perms as needed
+            if excluded_permutations.shape[1] < dim:
+                excluded_permutations = np.concatenate([
+                    excluded_permutations,
+                    np.zeros((excluded_permutations.shape[0], dim - excluded_permutations.shape[1]), dtype=excluded_permutations.dtype)
+                ],
+                    axis=1
+                )
+            elif excluded_permutations.shape[1] > dim:
+                raise ValueError("with dimension {} can't handle states of shape {}".format(dim, perms.shape))
+
+            # create equivalence casses for the exclusions
+            # so that we can remap to indices
+
+            _sort, _p_sort, _usums, _p_classes, _p_subsorts = self.get_equivalence_classes(
+                excluded_permutations
+            )
+            excluded_permutations = [None] * len(rule_groups)
+            for group in _p_classes:
+                # we need to find the class index & then the perm index inside the classes
+                cts = group[0][1]
+                for grp_index, rule_grp in enumerate(rule_groups):
+                    grp_cts = rule_grp[0][1]
+                    if len(grp_cts) == len(cts) and (grp_cts == cts).all():
+                        break
+                else:
+                    # excluded permutation can never come into play
+                    continue
+
+                exclusions = {}
+                for (cls, _, perm) in group:
+                    for i, (rule, _) in enumerate(rule_grp):
+                        if len(cls) == len(rule) and (cls == rule).all():
+                            # now we need to find the positions of the permutations within this class...
+                            rep = UniquePermutations.get_standard_permutation(cts, cls)
+                            pos = UniquePermutations.get_permutation_indices(
+                                rep[perm],
+                                classes=cls,
+                                counts=cts
+                            )
+                            # raise Exception(perm.dtype)
+                            for idx in pos:
+                                if idx not in exclusions:
+                                    exclusions[idx] = []
+                                exclusions[idx].append(i)
+                            # exclusions.append([i, indexer.index_permutations(perm)])
+                            break
+
+                excluded_permutations[grp_index] = exclusions
+        else:
+            excluded_permutations = [None] * len(rule_groups)
+
         if return_indices and indexing_method == 'secondary':
             secondary_inds = True
             return_indices = False
@@ -2748,7 +2848,7 @@ class SymmetricGroupGenerator:
                 substart = time.time()
                 with logger.block(tag='sum: {}'.format(nq), log_level=logger.LogLevel.Debug):
                     if not isinstance(logger, NullLogger):  # can be slow to log prettily
-                        input_classes_fmt = ["Class/Counts/Permutations"]+ [
+                        input_classes_fmt = ["Class/Counts/Permutations"] + [
                              "{}/{}/{}".format(y[0], y[1], len(y[2])) for y in input_classes
                         ]
                         logger.log_print(input_classes_fmt, log_level=logger.LogLevel.Debug)
@@ -2756,11 +2856,12 @@ class SymmetricGroupGenerator:
                     if return_indices:
                         ind_block = []
 
-                    for counts, classes in zip(rule_counts, rule_classes):
+                    for counts, classes, exc in zip(rule_counts, rule_classes, excluded_permutations):
                         res = self._build_direct_sums(input_classes, counts, classes,
                                                       return_indices=return_indices,
                                                       return_excitations=return_excitations,
                                                       filter=filter, inds_dtype=inds_dtype,
+                                                      excluded_permutations=exc,
                                                       full_basis=full_basis
                                                       )
                         # gc.collect()
@@ -3278,8 +3379,13 @@ class PermutationRelationGraph:
         :rtype:
         """
 
+        # we merge the groups by taking each existing group and checking
+        # if any of the ones that follow it contain any of its elements
+        # if so we merge them and shrink the number of groups we iterate over
+
+
         num_groups = np.inf
-        while len(groups) < num_groups:
+        while len(groups) < num_groups: # while the number of groups keeps shrinking
             num_groups = len(groups)
             new_groups = []
             for ind, grp in groups:

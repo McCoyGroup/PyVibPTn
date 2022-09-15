@@ -1,5 +1,5 @@
 from .CoordinateSystemConverter import CoordinateSystemConverter
-from .CommonCoordinateSystems import CartesianCoordinateSystem, ZMatrixCoordinateSystem
+from .CommonCoordinateSystems import CartesianCoordinates3D, ZMatrixCoordinates
 from ...Numputils import vec_norms, vec_angles, pts_dihedrals, dist_deriv, angle_deriv, dihed_deriv
 import numpy as np
 # this import gets bound at load time, so unfortunately PyCharm can't know just yet
@@ -12,7 +12,7 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
 
     @property
     def types(self):
-        return (CartesianCoordinateSystem, ZMatrixCoordinateSystem)
+        return (CartesianCoordinates3D, ZMatrixCoordinates)
 
     @staticmethod
     def get_dists(points, centers):
@@ -75,7 +75,7 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
         :rtype: np.ndarray
         """
         ncoords = len(coords)
-        orig_ol = ZMatrixCoordinateSystem.canonicalize_order_list(ncoords, ordering)
+        orig_ol = ZMatrixCoordinates.canonicalize_order_list(ncoords, ordering)
         ol = orig_ol
         nol = len(ol)
         ncol = len(ol[0])
@@ -86,7 +86,7 @@ class CartesianToZMatrixConverter(CoordinateSystemConverter):
 
         multiconfig = nol < ncoords
         if multiconfig:
-            ol = ZMatrixCoordinateSystem.tile_order_list(ol, ncoords)
+            ol = ZMatrixCoordinates.tile_order_list(ol, ncoords)
             mc_ol = ol.copy()
 
         # we define an order map that we'll index into to get the new indices for a

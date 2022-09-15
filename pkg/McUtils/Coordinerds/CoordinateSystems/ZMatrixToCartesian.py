@@ -1,5 +1,5 @@
 from .CoordinateSystemConverter import CoordinateSystemConverter
-from .CommonCoordinateSystems import CartesianCoordinateSystem, ZMatrixCoordinateSystem
+from .CommonCoordinateSystems import CartesianCoordinates3D, ZMatrixCoordinates
 from ...Numputils import *
 import numpy as np
 
@@ -10,7 +10,7 @@ class ZMatrixToCartesianConverter(CoordinateSystemConverter):
 
     @property
     def types(self):
-        return (ZMatrixCoordinateSystem, CartesianCoordinateSystem)
+        return (ZMatrixCoordinates, CartesianCoordinates3D)
 
     def default_ordering(self, coordlist):
         if coordlist.shape[-1] == 6:

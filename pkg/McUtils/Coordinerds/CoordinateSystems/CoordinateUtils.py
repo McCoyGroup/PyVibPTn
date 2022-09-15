@@ -9,7 +9,7 @@ __all__ = [
     "mc_safe_apply"
 ]
 
-def is_multiconfig(coords, coord_shape = None):
+def is_multiconfig(coords, coord_shape=None):
     if coord_shape is None:
         coord_shape = (None, None)
     return len(coords.shape) > len(coord_shape)
@@ -27,11 +27,11 @@ def mc_safe_apply(fun, coords):
 
     if is_multiconfig(coords):
         base_shape = coords.shape
-        new_shape = (np.product(base_shape[:-2]),) + base_shape[-2:]
+        new_shape = (-1,) + base_shape[-2:]
         coords = np.reshape(coords, new_shape)
         new_coords = fun(coords)
         rest = None
-        if isinstance(new_coords, tuple):
+        if not isinstance(new_coords, np.ndarray):
             rest = new_coords[1:]
             new_coords = new_coords[0]
         revert_shape = tuple(base_shape[:-2]) + new_coords.shape[1:]

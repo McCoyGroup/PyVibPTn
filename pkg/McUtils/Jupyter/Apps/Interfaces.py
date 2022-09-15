@@ -52,6 +52,7 @@ __all__ = [
     "Popover",
     "Layout",
     "Grid",
+    "Table",
     "Flex"
 ]
 __reload_hook__ = ["..JHTML", "..WidgetTools"]
@@ -1378,7 +1379,7 @@ class Grid(Layout):
             body = e['body']
             e = dict(e)
             del e['body']
-            e = GridItem(body, **dict(attrs, **e))
+            e = self.Item(body, **dict(attrs, **e))
         else:
             if e.row is None:
                 e.row = attrs['row']
@@ -1424,6 +1425,109 @@ class Grid(Layout):
             row_gap=self.row_gaps, col_gap=self.col_gaps,
             row_height=self.row_height, col_width=self.col_width
         )
+
+class TableItem(GridItem):
+    def __init__(self, item,
+                 row=None, col=None,
+                 row_span=None, col_span=None,
+                 alignment=None, justification=None,
+                 header=False,
+                 **attrs
+                 ):
+        super().__init__(
+            item,
+            row=row, col=col,
+            row_span=row_span, col_span=col_span,
+            alignment=alignment, justification=justification,
+            **attrs
+        )
+        self.header = header
+    def wrapper(self, item, **kwargs):
+        if self.header:
+            return JHTML.TableHeading(item, **kwargs)
+        else:
+            return JHTML.TableItem(item,  **kwargs)
+class Table(Grid):
+    Item = TableItem
+    def __init__(
+            self,
+            elements,
+            rows=None, cols=None,
+            alignment=None, justification=None,
+            row_spacing=None, col_spacing=None,
+            item_attrs=None,
+            row_height='1fr',
+            column_width='1fr',
+            table_headings=None,
+            striped=True,
+            **attrs
+    ):
+        self.headings = table_headings
+        self.striped = striped
+        super().__init__(
+            elements,
+            rows=rows, cols=cols,
+            alignment=alignment, justification=justification,
+            row_spacing=row_spacing, col_spacing=col_spacing,
+            item_attrs=item_attrs,
+            row_height=row_height,
+            column_width=column_width,
+            **attrs
+        )
+    def wrapper(self, *elems, cls=None, **attrs):
+        if self.striped:
+            cls = ['table', 'table-striped'] + JHTML.manage_class(cls)
+        else:
+            cls = ['table'] + JHTML.manage_class(cls)
+        if self.headings is not None:
+            elems = [
+                JHTML.TableHeader(elems[0], display='contents'),
+                JHTML.TableBody(*elems[1:], display='contents')
+            ]
+        else:
+            elems = [JHTML.TableBody(*elems, display='contents')]
+        return JHTML.Table(
+            *elems,
+            cls=cls,
+            **attrs
+        )
+
+    def setup_layout(self, grid, attrs):
+        rows = []
+        nrows = 0
+        ncols = 0
+        has_header = self.headings is not None
+        if has_header:
+            header = JHTML.TableRow(*[
+                self.wrap_item(el, dict(attrs, row=0, col=j+1, header=True))
+                for j,el in enumerate(self.headings)
+                ],
+                display='contents'
+            )
+            rows.append(header)
+            nrows = 1
+        for i, row in enumerate(grid):
+            tr = []
+            if has_header:
+                i += 1
+            for j, el in enumerate(row):
+                if el is None:
+                    continue
+                elem = self.wrap_item(el, dict(attrs, row=i+1, col=j+1))
+                n = elem.row
+                if elem.row_span is not None:
+                    n += elem.row_span
+                if n > nrows:
+                    nrows = n
+                m = elem.col
+                if elem.col_span is not None:
+                    m += elem.col_span
+                if m > ncols:
+                    ncols = m
+                tr.append(elem)
+            rows.append(JHTML.TableRow(*tr, display='contents'))
+        return {'rows':nrows, 'cols':ncols}, rows
+
 
 class FlexItem(LayoutItem):
     def __init__(self,

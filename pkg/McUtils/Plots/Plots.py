@@ -113,7 +113,12 @@ def _interp2DData(gpts, **opts):
     return xmesh, ymesh, vals.T
 
 def _get_2D_plotdata(func, xrange):
-    if not callable(func):
+    if hasattr(func, 'subs'):
+        from sympy import lambdify
+        sym, xrange = xrange
+        xrange = np.arange(*xrange)
+        fvalues = lambdify([sym], func)(xrange)
+    elif not callable(func):
         fvalues = xrange
         xrange = func
     else:
@@ -252,7 +257,8 @@ class Plot(Graphics):
 
     known_keys = Graphics.known_keys | {
         'method',
-        'plot_style'
+        'plot_style',
+        'insert_default_styles'
     }
     @classmethod
     def filter_options(cls, opts, allowed=None):
@@ -795,7 +801,7 @@ class ArrayPlot(DataPlot):
     Plots an array as an image
     """
 
-    method = 'imshow',
+    method = 'imshow'
     known_styles = DataPlot.image_params
     def __init__(self, *params,
                  plot_style=None, colorbar=None,

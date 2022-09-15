@@ -25,7 +25,8 @@ class CoordinateSystem:
                  name=None, basis=None, matrix=None, inverse=None,
                  dimension=None, origin=None, coordinate_shape=None,
                  jacobian_prep=None,
-                 converter_options=None
+                 converter_options=None,
+                 **extra
                  ):
         """
         Sets up the CoordinateSystem object
@@ -50,8 +51,8 @@ class CoordinateSystem:
             elif matrix is not None:
                 dimension = (matrix.shape[-1],)
 
-        if coordinate_shape is None:
-            coordinate_shape = dimension
+        # if coordinate_shape is None:
+        #     coordinate_shape = dimension
         # if matrix is not None and (coordinate_shape is not None and coordinate_shape[-1] != matrix.shape[-1]):
         #     raise CoordinateSystemError(
         #         "{}: expansion matrix shape {} must be compatible with coordinate shape {}".format(
@@ -63,6 +64,7 @@ class CoordinateSystem:
 
         if converter_options is None:
             converter_options = {}
+        converter_options = dict(extra, **converter_options)
 
         self.name = name
         self._basis = basis
@@ -216,7 +218,7 @@ class CoordinateSystem:
                 return self.converter.convert_many(coords, **self.kwargs)
             else:
                 return self.converter.convert(coords, **self.kwargs)
-    def convert_coords(self, coords, system, **kw):
+    def convert_coords(self, coords, system, converter=None, **kw):
         """
         Converts coordiantes from the current coordinate system to _system_
 
@@ -253,10 +255,10 @@ class CoordinateSystem:
                 if extra>0:
                     orig = np.reshape(orig, (1,)*extra+orig.shape)
                 coords = coords + orig
-            return self.basis.convert_coords(coords, system, **kw)
+            return self.basis.convert_coords(coords, system, converter=converter, **kw)
 
         elif system.matrix is not None:
-            coords, convs = self.convert_coords(coords, system.basis, **kw)
+            coords, convs = self.convert_coords(coords, system.basis, converter=converter, **kw)
             inv = system.inverse
             orig = system.origin
             if orig is not None:
@@ -272,11 +274,39 @@ class CoordinateSystem:
             return coords, convs
         else:
             # print("> okkkay", kw['return_derivs'] if 'return_derivs' in kw else 'nooooooo')
-            converter = self.converter(system)
+            if converter is None:
+                converter = self.converter(system)
             fun = self._convert_caller(converter, kw.copy(), is_multiconfig(coords))
             new_coords = mc_safe_apply(fun, coords=coords)
+            # new_coords = fun(coords)
             # print("...wtf", kw['return_derivs'] if 'return_derivs' in kw else 'nooooooo')
             return new_coords
+
+    def rescale(self, scaling, in_place=False):
+        if not in_place:
+            import copy
+            new = copy.copy(self)
+            return new.rescale(scaling, in_place=True)
+        if self.matrix is not None:
+            self.matrix = self.matrix * scaling[np.newaxis, :]
+            if self._inv is not None:
+                self._inv = self._inv / scaling[:, np.newaxis]
+        else:
+            self.matrix = np.diag(scaling)
+        return self
+    def rotate(self, rot, in_place=False):
+        if not in_place:
+            import copy
+            new = copy.copy(self)
+            return new.rotate(rot, in_place=True)
+        if self.matrix is not None:
+            self.matrix = np.dot(self.matrix, rot)
+            if self._inv is not None:
+                self._inv = np.dot(rot, self._inv)
+        else:
+            self.matrix = rot
+        return self
+
 
     def displacement(self, amts):
         """
@@ -507,7 +537,7 @@ class CoordinateSystem:
 
                 convert = self._converter(system, deriv_key, self, num_derivs, kw)
             else:
-                print(">>>", converter_options)
+                # print(">>>", converter_options)
                 convert = self._converter(system, deriv_key, self, None, converter_options)
                 # convert = lambda c, s=system, kw=converter_options:
         else:
@@ -579,7 +609,16 @@ class CoordinateSystem:
         :rtype: str
         """
         return "CoordinateSystem({}, dimension={}, matrix={})".format(self.name, self.dimension, self.matrix)
-
+    @classmethod
+    def is_compatible(cls, self, system):
+        return (
+                self is system
+                or self.name == system.name
+                # or (isinstance(system, type) and isinstance(self, system))
+        )
+        # or system1.name == key_pair[0].name and system2.name == key_pair[1].name
+    def has_conversion(self, system): # to be overloaded
+        return False
 
 ######################################################################################################
 ##

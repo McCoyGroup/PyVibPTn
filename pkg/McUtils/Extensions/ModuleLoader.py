@@ -122,6 +122,15 @@ class ModuleLoader:
 
     def load(self, file, pkg=None):
         if self.loader is not None:
-            return self.loader.unshare(file, pkg=pkg)
+            return self.loader.load(file, pkg=pkg)
         else:
-            return importlib.import_module(file, package=pkg)
+            if pkg is None:
+                rootdir = os.path.dirname(file)
+                sys.path.insert(0, rootdir)
+                try:
+                    mod = importlib.import_module(os.path.basename(os.path.splitext(file)[0]))
+                finally:
+                    sys.path.pop(0)
+            else:
+                mod = importlib.import_module(file, package=pkg)
+            return mod
