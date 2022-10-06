@@ -46,7 +46,7 @@ class TensorExpansionTerms:
             self._arr = array
             self.name = name
         @abc.abstractmethod
-        def deriv(self)->'TensorExpansionTerms.TensorExpansionTerm':
+        def deriv(self)-> 'TensorExpansionTerms.TensorExpressionTerm':
             raise NotImplementedError("base class")
         def dQ(self):
             new_term = self.deriv()
@@ -84,7 +84,7 @@ class TensorExpansionTerms:
             else:
                 return self.name
         @abc.abstractmethod
-        def reduce_terms(self, check_arrays=False)-> 'TensorExpansionTerms.TensorExpansionTerm':
+        def reduce_terms(self, check_arrays=False)-> 'TensorExpansionTerms.TensorExpressionTerm':
             raise NotImplementedError("base class")
         def _check_simp(self, new):
             new._arr = None
@@ -156,7 +156,7 @@ class TensorExpansionTerms:
         def __eq__(self, other):
             return str(self) == str(other)
     class SumTerm(TensorExpansionTerm):
-        def __init__(self, *terms:'TensorExpansionTerms.TensorExpansionTerm', array=None):
+        def __init__(self, *terms: 'TensorExpansionTerms.TensorExpressionTerm', array=None):
             super().__init__(array=array)
             self.terms=terms
         def deriv(self):
@@ -206,7 +206,7 @@ class TensorExpansionTerms:
                 my_terms.append(other)
                 return type(self)(*my_terms)
     class ScalingTerm(TensorExpansionTerm):
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', scaling, array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', scaling, array=None):
             super().__init__(array=array)
             self.scaling = scaling
             self.term = term
@@ -257,7 +257,7 @@ class TensorExpansionTerms:
         """
         Represents x^n. Only can get valid derivatives for scalar terms. Beware of that.
         """
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', pow, array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', pow, array=None):
             super().__init__(array=array)
             self.term = term
             self.pow=pow
@@ -289,7 +289,7 @@ class TensorExpansionTerms:
         """
         Represents 1/x. Only can get valid derivatives for scalar terms. Beware of that.
         """
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', pow=-1, array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', pow=-1, array=None):
             super().__init__(term, -1, array=array)
         def to_string(self):
             return '1/{}'.format(self.term)
@@ -304,7 +304,7 @@ class TensorExpansionTerms:
             else:
                 return super().reduce_terms(check_arrays=check_arrays)
     class AxisShiftTerm(TensorExpansionTerm):
-        def __init__(self, term:'TensorExpansionTerms.TensorExpansionTerm', start:int, end:int, array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', start:int, end:int, array=None):
             super().__init__(array=array)
             self.term=term
             self.a=start
@@ -390,10 +390,10 @@ class TensorExpansionTerms:
 
             return new
     class ContractionTerm(TensorExpansionTerm):
-        def __init__(self, left:'TensorExpansionTerms.TensorExpansionTerm',
+        def __init__(self, left: 'TensorExpansionTerms.TensorExpressionTerm',
                      i:typing.Union[int, typing.Iterable[int]],
                      j:typing.Union[int, typing.Iterable[int]],
-                     right:'TensorExpansionTerms.TensorExpansionTerm', array=None):
+                     right: 'TensorExpansionTerms.TensorExpressionTerm', array=None):
             super().__init__(array=array)
             self.left=left
             self.i=i
@@ -638,7 +638,7 @@ class TensorExpansionTerms:
 
     # fancier terms
     class InverseTerm(TensorExpansionTerm):
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', array=None):
             super().__init__(array=array)
             self.term = term
         def rank(self):
@@ -658,7 +658,7 @@ class TensorExpansionTerms:
             sub = self.dot(dq, self.ndim, 2).shift(self.ndim, 1)  # self.dot(self.term.dQ(), self.ndim, 2)
             return -sub.dot(self, sub.ndim, 1)  # .shift(self.ndim, 1)
     class TraceTerm(TensorExpansionTerm):
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', axis1=1, axis2=2, array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', axis1=1, axis2=2, array=None):
             super().__init__(array=array)
             self.term = term
             self.axis1 = axis1
@@ -699,7 +699,7 @@ class TensorExpansionTerms:
             wat = self.term.dQ()
             return type(self)(wat, axis1=self.axis1+1, axis2=self.axis2+1)
     class DeterminantTerm(TensorExpansionTerm):
-        def __init__(self, term: 'TensorExpansionTerms.TensorExpansionTerm', array=None):
+        def __init__(self, term: 'TensorExpansionTerms.TensorExpressionTerm', array=None):
             super().__init__(array=array)
             self.term = term
         def rank(self):

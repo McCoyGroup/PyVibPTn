@@ -1,22 +1,7 @@
-# Psience
+# PyVibPTn
 
-Psience is a set of core scientific packages written by the McCoy group for the McCoy group to handle interesting scientific problems, like DVR, managing potential and dipole surfaces, VPT2, normal mode analysis, etc.
 
-We're working on [documenting the package](https://mccoygroup.github.io/Psience), but writing good documentation takes more time than writing good code.
+At this stage, PyVibPTn is a thin wrapper on the VPT2 package inside the [Psience](https://github.com/McCoyGroup/Psience) library for vibrational spectroscopy.
+PyVibPTn can be installed by downloading the source, however it will likely be easier (and more up to date) to use Psience, which is on PyPI and can be `pip` installed.
 
-### Installation & Requirements
-
-`Psience` is written in pure python and we've worked to try to avoid any major dependencies outside of what comes in `Anaconda` and our `McUtils` package.
-
-It is unlikely that Psience will even find its way onto PyPI, so the best thing to do is install from GitHub via `git clone`. 
-The `master` branch _should_ be stable. Other branches are intended to be development branches. 
-
-### Contributing
-
-If you'd like to help out with this, we'd love contributions.
-The easiest way to get started with it is to try it out.
-When you find bugs, please [report them](https://github.com/McCoyGroup/Psience/issues/new?title=Bug%20Found:&labels=bug). 
-If there are things you'd like added [let us know](https://github.com/McCoyGroup/Psience/issues/new?title=Feature%20Request:&labels=enhancement), and we'll try to help you get the context you need to add them yourself.
-One of the biggest places where people can help out, though, is in improving the quality of the documentation.
-As you try things out, add them as examples, either to the [main page](https://mccoygroup.github.io/References/Documentation/Psience.html#examples) or to a [child page](https://mccoygroup.github.io/References/Documentation/Psience/Molecools/Molecule/Molecule.html#examples).
-You can also edit the docstrings in the code to add context, explanation, argument types, return types, etc.
+Please see the documentation for [Psience](https://mccoygroup.github.io/Psience) and in particular the documentation for the [`VPT2` subpackage Psience](https://mccoygroup.github.io/Psience/Psience/VPT2) for more information.
